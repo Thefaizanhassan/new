@@ -7,9 +7,9 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 
 | | |
 |---|---|
-| **Current phase** | Phase 1 — Foundation *(in progress; one architecture decision pending)* |
+| **Current phase** | Phase 2 — Market data layer *(complete)* |
 | **Market** | India-first (NSE/BSE), US adapter at Phase 9 |
-| **Tests** | 110 passing · ruff, ruff-format and mypy clean |
+| **Tests** | 172 passing · ruff, ruff-format and mypy clean |
 | **Trading mode** | `RESEARCH` — `LIVE` is refused at startup and stays refused until Phase 12 |
 
 ## Start here
@@ -20,8 +20,10 @@ algorithmic trading strategies — built so that **AI never directly controls mo
    main document.**
 3. **[Technology Evaluation](docs/technology-evaluation.md)** — pandas, TA-Lib and Backtrader assessed
    against verified current status. **Contains one decision awaiting your approval.**
-4. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
-5. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
+4. **[The Data Layer](docs/data-layer.md)** — bitemporal storage, corporate actions, and the two
+   different questions "as of" can mean.
+5. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
+6. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
 
 ## Quick start
 
@@ -43,20 +45,27 @@ without a passing risk check. Plus the pandas data pipeline with a full validati
 delivery and intraday cost models, NSE/BSE calendars, SEBI and US compliance profiles, and
 environment-driven config that refuses `LIVE` mode outright.
 
-Plus the Phase 1 walking skeleton: a yfinance adapter and a deterministic synthetic provider,
-eight documented TA-Lib indicators, two reference strategies, a pre-trade risk engine with a
-filesystem kill switch, and an end-to-end runner that produces an equity curve, a full decision
-chain and a reproducible run manifest.
+Plus the walking skeleton: eight documented TA-Lib indicators, two reference strategies, a
+pre-trade risk engine with a filesystem kill switch, and an end-to-end runner producing an
+equity curve, a full decision chain and a reproducible run manifest.
+
+And the Phase 2 data layer: a bitemporal Parquet store queried through DuckDB, corporate
+actions applied on read while raw prices stay immutable, resumable chunked backfill with
+quarantine, and a data-trust tier that travels with the bars and cannot be laundered by
+storage. See [docs/data-layer.md](docs/data-layer.md).
 
 **Not built yet:** the real backtesting engine (slippage, spread, partial fills, volume caps),
 validation and walk-forward testing, paper trading, broker connections, and the dashboard.
 **You cannot place a trade with this, by design.**
 
 ```bash
-uv run trading status                        # how this instance is configured
-uv run trading check-data --symbol RELIANCE  # load bars and run the validation gate
-uv run trading backtest --strategy sma_cross # the walking skeleton, end to end
-uv run trading indicators --name RSI         # what an indicator means and where it misleads
+uv run trading status                            # how this instance is configured
+uv run trading ingest  --symbol RELIANCE         # backfill into the local store (resumable)
+uv run trading catalog                           # what data you actually hold
+uv run trading actions --symbol RELIANCE         # record and list corporate actions
+uv run trading check-data --symbol RELIANCE      # run the validation gate
+uv run trading backtest --source store           # end to end, split-adjusted, from disk
+uv run trading indicators --name RSI             # what it means and where it misleads
 ```
 
 ## The one-paragraph version

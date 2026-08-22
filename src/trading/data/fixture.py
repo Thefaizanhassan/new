@@ -28,6 +28,13 @@ __all__ = ["FixtureProvider"]
 class FixtureProvider:
     """Generates a plausible-looking but entirely fictional daily series."""
 
+    #: The series is always generated from this date forward and then sliced,
+    #: so any sub-range is a slice of one series. Without this, fetching
+    #: 2023-2024 in two chunks would produce different values than fetching it
+    #: in one — which would make chunked backfill untestable and would not
+    #: resemble a real provider, where history is history.
+    EPOCH = dt.date(2015, 1, 1)
+
     def __init__(
         self,
         *,
@@ -63,7 +70,9 @@ class FixtureProvider:
             raise ValueError("The fixture provider generates daily bars only")
 
         calendar = calendar_for(EXCHANGES[instrument_id.exchange].calendar_code)
-        sessions = calendar.sessions_between(start, end)
+        # Generate from the epoch so a bar's value depends only on its date,
+        # never on the window it was requested in.
+        sessions = calendar.sessions_between(min(self.EPOCH, start), end)
         if len(sessions) == 0:
             return pd.DataFrame(
                 columns=["open", "high", "low", "close", "volume"],
@@ -97,6 +106,7 @@ class FixtureProvider:
             index=index,
         )
 
+        frame = frame[frame.index >= pd.Timestamp(start, tz="UTC")]
         if as_of is not None:
             frame = frame[frame.index <= pd.Timestamp(as_of)]
         return frame

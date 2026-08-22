@@ -423,7 +423,15 @@ class WalkingSkeletonRunner:
 
     def _manifest(self, start: dt.date, end: dt.date, bars: int) -> dict[str, str]:
         """Provenance. Without it a backtest is an anecdote (Phase 0 §16.3)."""
+        # A store-backed provider can hash exactly the rows this run saw, which
+        # is what makes "did the data move or did the code?" answerable.
+        dataset_version = "unversioned"
+        versioner = getattr(self.provider, "dataset_version", None)
+        if callable(versioner):
+            dataset_version = str(versioner(self.instrument.id, start, end))
+
         return {
+            "dataset_version": dataset_version,
             **self.strategy.spec.manifest_entry(),
             **self.provider.info.manifest_entry(),
             "cost_model_id": self.cost_model.model_id,
