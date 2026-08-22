@@ -125,6 +125,45 @@ $ uv run pytest tests/unit/test_validation.py -v
 
 ---
 
+## 4b. Getting real NSE data onto your machine
+
+Now that the data layer exists, this is the first genuinely useful thing you can do locally.
+
+```
+$ uv run trading ingest --symbol RELIANCE --source yfinance --start 2015-01-01
+```
+
+That fetches ten years of daily NSE bars, runs every one through the validation gate, and
+stores them as Parquet under `data/`. It is **resumable and safe to re-run** — progress comes
+from what is actually in the store, so an interrupted backfill picks up where it stopped and a
+completed one writes nothing.
+
+```
+$ uv run trading catalog          # what you now hold
+$ uv run trading backtest --source store --strategy sma_cross
+```
+
+A few things worth knowing:
+
+- **`--source yfinance` needs the internet; `--source fixture` does not.** The fixture provider
+  generates deterministic synthetic bars, which is what the tests use. Start with `fixture` to
+  confirm the plumbing, then switch.
+- **Be polite to free endpoints.** For a long backfill add `--pause 1 --chunk-days 365`. Getting
+  rate-limited midway costs more time than pausing does.
+- **Recording a split never rewrites what's on disk.** Raw prices stay immutable; adjustment
+  happens on read:
+  ```
+  $ uv run trading actions --symbol RELIANCE --add-split 2024-10-28:4
+  ```
+- **yfinance data is tagged `PROTOTYPE`**, and that tag travels into every run manifest. The
+  code will not let a strategy be promoted past research on it. That is deliberate — see
+  [docs/data-layer.md](data-layer.md).
+
+If a chunk fails validation it is written to `data/quarantine/` with the reason rather than
+dropped, and `trading ingest` exits non-zero so you notice.
+
+---
+
 ## 5. Postgres — not yet, but here's how when you need it
 
 Phase 1 writes nothing to a database. From **Phase 7 (paper trading)** you'll want the Postgres
@@ -214,6 +253,9 @@ Recorded here so it isn't a surprise later. **None of it is needed for research 
 | `uv run mypy` | Type-check |
 | `uv sync --all-groups` | Reinstall after dependencies change |
 | `uv run python` | A Python shell with everything importable |
+| `uv run trading ingest --symbol X` | Backfill bars into the local store |
+| `uv run trading catalog` | What data you hold |
+| `uv run trading backtest --source store` | Run the skeleton against stored, adjusted data |
 
 Poking at it directly:
 
@@ -253,13 +295,14 @@ If you somehow hit a source build, `brew install ta-lib` first, then `uv sync` a
 Phase 1 is the foundation, not a usable trading system. Honestly:
 
 **Works today:** the domain core (exact money, FIFO-lot position accounting, the risk-approval
-gate that makes orders unforgeable), the pandas data pipeline with the full validation gate,
-Indian cost models for delivery and intraday, NSE/BSE market calendars, SEBI and US compliance
-profiles, config with a hard refusal of `LIVE` mode, structured logging, and 75 tests.
+gate that makes orders unforgeable); the pandas data pipeline with the full validation gate; a
+bitemporal Parquet store with corporate actions and resumable backfill; Indian cost models;
+NSE/BSE calendars; SEBI and US compliance profiles; eight documented indicators; two reference
+strategies; a pre-trade risk engine; and an end-to-end runner. 172 tests.
 
-**Does not exist yet:** loading real market data, indicators, strategies, the backtesting
-engine, the risk engine itself (only its token type exists), paper trading, any broker
-connection, and the dashboard.
+**Does not exist yet:** the real backtesting engine (slippage, spread, partial fills, volume
+caps), validation and walk-forward testing, paper trading, any broker connection, and the
+dashboard.
 
 **You cannot place a trade with this, on purpose.** `TRADING_MODE=LIVE` is refused at startup
 with an explanatory error, and will stay refused until Phase 12.
