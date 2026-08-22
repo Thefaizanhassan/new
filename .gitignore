@@ -6,8 +6,10 @@
 *.key
 credentials.json
 
-# Data — large, regenerable, and often licence-restricted
-data/
+# Data — large, regenerable, and often licence-restricted.
+# Anchored to the repo root: a bare `data/` also matches src/trading/data/,
+# which silently excluded the provider source from the first commit.
+/data/
 *.parquet
 *.duckdb
 *.db
