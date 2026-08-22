@@ -78,7 +78,9 @@ class YFinanceProvider:
     def _download(self, symbol: str, start: dt.date, end: dt.date, interval: str) -> pd.DataFrame:
         if self._downloader is not None:
             return self._downloader(symbol, start=start, end=end, interval=interval)
-        import yfinance as yf
+        # Imported lazily so the fixture provider and the test suite never
+        # require yfinance to be installed or the network to be reachable.
+        import yfinance as yf  # noqa: PLC0415
 
         return yf.download(
             symbol,
@@ -126,7 +128,9 @@ class YFinanceProvider:
 
         # Daily NSE bars arrive dated, not timestamped. Label them at the
         # session close so `timestamp <= now` remains a sound knowability test.
-        source_tz = "Asia/Kolkata" if instrument_id.exchange in ("NSE", "BSE") else "America/New_York"
+        source_tz = (
+            "Asia/Kolkata" if instrument_id.exchange in ("NSE", "BSE") else "America/New_York"
+        )
         normalized = normalize_ohlcv(df, tz=source_tz)
 
         if timeframe is Timeframe.DAY_1:

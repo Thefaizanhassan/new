@@ -22,10 +22,20 @@ OPTIONAL_COLUMNS: Final[tuple[str, ...]] = ("adj_close", "bid", "ask", "spread")
 
 # Provider spellings we accept and fold into the canonical names.
 _ALIASES: Final[dict[str, str]] = {
-    "date": "timestamp", "datetime": "timestamp", "time": "timestamp", "ts": "timestamp",
-    "o": "open", "h": "high", "l": "low", "c": "close", "v": "volume",
-    "vol": "volume", "qty": "volume", "adjclose": "adj_close",
-    "adj close": "adj_close", "adjusted_close": "adj_close",
+    "date": "timestamp",
+    "datetime": "timestamp",
+    "time": "timestamp",
+    "ts": "timestamp",
+    "o": "open",
+    "h": "high",
+    "l": "low",
+    "c": "close",
+    "v": "volume",
+    "vol": "volume",
+    "qty": "volume",
+    "adjclose": "adj_close",
+    "adj close": "adj_close",
+    "adjusted_close": "adj_close",
 }
 
 

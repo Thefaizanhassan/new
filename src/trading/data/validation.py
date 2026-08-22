@@ -28,9 +28,9 @@ __all__ = ["Check", "DataQualityReport", "Severity", "ValidationIssue", "validat
 
 
 class Severity(StrEnum):
-    ERROR = "ERROR"      # data is unusable; quarantine
+    ERROR = "ERROR"  # data is unusable; quarantine
     WARNING = "WARNING"  # usable but suspicious; a human should look
-    INFO = "INFO"        # worth recording, not worth acting on
+    INFO = "INFO"  # worth recording, not worth acting on
 
 
 class Check(StrEnum):
@@ -108,6 +108,210 @@ class DataQualityReport:
         )
 
 
+def _check_schema(df: pd.DataFrame, report: DataQualityReport) -> bool:
+    """Structural checks. Returns False when nothing further can be evaluated."""
+    missing = [c for c in OHLCV_COLUMNS if c not in df.columns]
+    if missing:
+        report.add(Check.SCHEMA, Severity.ERROR, f"missing columns {missing}")
+        return False
+    if not isinstance(df.index, pd.DatetimeIndex):
+        report.add(Check.SCHEMA, Severity.ERROR, "index is not a DatetimeIndex")
+        return False
+    return True
+
+
+def _check_timezone(df: pd.DataFrame, report: DataQualityReport) -> None:
+    if df.index.tz is None:
+        report.add(
+            Check.TIMEZONE,
+            Severity.ERROR,
+            "timestamps are timezone-naive; UTC is required before storage",
+        )
+    elif str(df.index.tz) not in ("UTC", "utc"):
+        report.add(
+            Check.TIMEZONE, Severity.WARNING, f"index timezone is {df.index.tz}, expected UTC"
+        )
+
+
+def _check_ordering(df: pd.DataFrame, report: DataQualityReport) -> None:
+    if not df.index.is_monotonic_increasing:
+        report.add(Check.MONOTONIC, Severity.ERROR, "timestamps are not in ascending order")
+
+    duplicates = df.index[df.index.duplicated(keep=False)]
+    if len(duplicates):
+        report.add(
+            Check.DUPLICATE_TIMESTAMPS,
+            Severity.ERROR,
+            "duplicate timestamps",
+            len(duplicates),
+            tuple(str(t) for t in duplicates.unique()[:3]),
+        )
+
+
+def _check_missing_values(df: pd.DataFrame, report: DataQualityReport) -> None:
+    nulls = df[list(OHLCV_COLUMNS)].isna().sum()
+    total = int(nulls.sum())
+    if total:
+        detail = ", ".join(f"{c}={int(n)}" for c, n in nulls.items() if n)
+        report.add(Check.MISSING_VALUES, Severity.ERROR, f"null values ({detail})", total)
+
+
+def _check_prices(valid: pd.DataFrame, report: DataQualityReport) -> None:
+    prices = valid[["open", "high", "low", "close"]]
+
+    nonpositive = valid[(prices <= 0).any(axis=1)]
+    if len(nonpositive):
+        report.add(
+            Check.IMPOSSIBLE_PRICE,
+            Severity.ERROR,
+            "non-positive prices",
+            len(nonpositive),
+            tuple(str(t) for t in nonpositive.index[:3]),
+        )
+
+    inconsistent = valid[
+        (valid["high"] < valid[["open", "close"]].max(axis=1))
+        | (valid["low"] > valid[["open", "close"]].min(axis=1))
+        | (valid["high"] < valid["low"])
+    ]
+    if len(inconsistent):
+        report.add(
+            Check.OHLC_RELATIONSHIP,
+            Severity.ERROR,
+            "high/low inconsistent with open/close",
+            len(inconsistent),
+            tuple(str(t) for t in inconsistent.index[:3]),
+        )
+
+
+def _check_volume(df: pd.DataFrame, report: DataQualityReport, volume_spike_sigma: float) -> None:
+    volume = df["volume"].dropna()
+
+    if (volume < 0).any():
+        report.add(
+            Check.ABNORMAL_VOLUME, Severity.ERROR, "negative volume", int((volume < 0).sum())
+        )
+
+    zero_volume = int((volume == 0).sum())
+    if zero_volume:
+        report.add(
+            Check.ZERO_VOLUME,
+            Severity.WARNING,
+            "zero-volume bars — often a halt, a holiday, or a padded row",
+            zero_volume,
+        )
+
+    if len(volume) <= 30:
+        return
+
+    # The rolling mean must share `volume`'s index or the comparison silently
+    # misaligns, and it is shifted by one so a bar is judged against history
+    # that excludes itself.
+    baseline = volume.rolling(20, min_periods=10).mean().shift(1)
+    comparable = baseline.notna() & (baseline > 0)
+    spikes = volume[comparable & (volume > baseline * volume_spike_sigma)]
+    if len(spikes):
+        report.add(
+            Check.ABNORMAL_VOLUME,
+            Severity.WARNING,
+            f"volume exceeding {volume_spike_sigma}x its 20-bar average",
+            len(spikes),
+            tuple(str(t) for t in spikes.index[:3]),
+        )
+
+
+def _check_gaps(valid: pd.DataFrame, report: DataQualityReport, gap_threshold: float) -> None:
+    if len(valid) <= 1:
+        return
+
+    change = valid["close"].pct_change().abs()
+    jumps = change[change > gap_threshold]
+    if len(jumps):
+        report.add(
+            Check.CORPORATE_ACTION,
+            Severity.WARNING,
+            f"close moved >{gap_threshold:.0%} between bars — verify it is not an "
+            "unapplied split or bonus issue",
+            len(jumps),
+            tuple(f"{t}: {v:.1%}" for t, v in jumps.head(3).items()),
+        )
+
+    overnight = (valid["open"] / valid["close"].shift(1) - 1).abs().dropna()
+    large = overnight[overnight > gap_threshold]
+    if len(large):
+        report.add(Check.GAPS, Severity.INFO, "large overnight gaps", len(large))
+
+
+def _check_frequency(
+    df: pd.DataFrame, report: DataQualityReport, expected_freq: timedelta | None
+) -> None:
+    if len(df.index) <= 2:
+        return
+    modal = pd.Series(df.index).diff().dropna().mode()
+    if not len(modal):
+        return
+
+    report.add(Check.FREQUENCY, Severity.INFO, f"modal bar interval is {modal.iloc[0]}")
+    if expected_freq is not None and modal.iloc[0] != pd.Timedelta(expected_freq):
+        report.add(
+            Check.FREQUENCY,
+            Severity.ERROR,
+            f"expected {expected_freq} bars, data is mostly {modal.iloc[0]}",
+        )
+
+
+def _check_sessions(
+    df: pd.DataFrame, report: DataQualityReport, expected_sessions: pd.DatetimeIndex | None
+) -> None:
+    if expected_sessions is None or not len(expected_sessions):
+        report.add(
+            Check.MISSING_CANDLES,
+            Severity.INFO,
+            "skipped — no exchange calendar supplied, so gaps cannot be detected",
+        )
+        return
+
+    expected_days = pd.DatetimeIndex(expected_sessions).tz_convert("UTC").normalize().unique()
+    present_days = df.index.normalize().unique()
+
+    missing = expected_days.difference(present_days)
+    if len(missing):
+        report.add(
+            Check.MISSING_CANDLES,
+            Severity.WARNING,
+            "trading sessions with no bar",
+            len(missing),
+            tuple(str(d.date()) for d in missing[:3]),
+        )
+
+    unexpected = present_days.difference(expected_days)
+    if len(unexpected):
+        report.add(
+            Check.SESSION_ALIGNMENT,
+            Severity.ERROR,
+            "bars on dates the exchange was closed",
+            len(unexpected),
+            tuple(str(d.date()) for d in unexpected[:3]),
+        )
+
+
+def _check_staleness(
+    df: pd.DataFrame,
+    report: DataQualityReport,
+    now: datetime | None,
+    max_staleness: timedelta | None,
+) -> None:
+    if now is None or max_staleness is None:
+        return
+    age = now - df.index.max().to_pydatetime()
+    if age > max_staleness:
+        report.add(
+            Check.STALE_DATA,
+            Severity.ERROR,
+            f"most recent bar is {age} old, limit is {max_staleness}",
+        )
+
+
 def validate_ohlcv(
     df: pd.DataFrame,
     *,
@@ -119,12 +323,12 @@ def validate_ohlcv(
     volume_spike_sigma: float = 8.0,
     gap_threshold: float = 0.20,
 ) -> DataQualityReport:
-    """Run every §1 check and return a report.
+    """Run every check from the standards checklist and return a report.
 
     ``expected_sessions`` should come from the exchange calendar.  Without it
-    the missing-candle and session-alignment checks are skipped and say so,
+    the missing-candle and session-alignment checks are skipped and **say so**,
     rather than silently passing — a check that quietly does nothing is worse
-    than no check.
+    than no check at all.
     """
     report = DataQualityReport(
         symbol=symbol,
@@ -137,154 +341,19 @@ def validate_ohlcv(
         report.add(Check.SCHEMA, Severity.ERROR, "dataset is empty")
         return report
 
-    # ── schema and timezone ─────────────────────────────────────────────────
-    missing_cols = [c for c in OHLCV_COLUMNS if c not in df.columns]
-    if missing_cols:
-        report.add(Check.SCHEMA, Severity.ERROR, f"missing columns {missing_cols}")
+    if not _check_schema(df, report):
         return report
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        report.add(Check.SCHEMA, Severity.ERROR, "index is not a DatetimeIndex")
-        return report
-    if df.index.tz is None:
-        report.add(
-            Check.TIMEZONE, Severity.ERROR,
-            "timestamps are timezone-naive; UTC is required before storage",
-        )
-    elif str(df.index.tz) not in ("UTC", "utc"):
-        report.add(
-            Check.TIMEZONE, Severity.WARNING, f"index timezone is {df.index.tz}, expected UTC"
-        )
+    _check_timezone(df, report)
+    _check_ordering(df, report)
+    _check_missing_values(df, report)
 
-    # ── ordering and duplicates ─────────────────────────────────────────────
-    if not df.index.is_monotonic_increasing:
-        report.add(Check.MONOTONIC, Severity.ERROR, "timestamps are not in ascending order")
-
-    dupes = df.index[df.index.duplicated(keep=False)]
-    if len(dupes):
-        report.add(
-            Check.DUPLICATE_TIMESTAMPS, Severity.ERROR,
-            "duplicate timestamps", int(len(dupes)),
-            tuple(str(t) for t in dupes.unique()[:3]),
-        )
-
-    # ── missing values ──────────────────────────────────────────────────────
-    nulls = df[list(OHLCV_COLUMNS)].isna().sum()
-    if int(nulls.sum()):
-        detail = ", ".join(f"{c}={int(n)}" for c, n in nulls.items() if n)
-        report.add(Check.MISSING_VALUES, Severity.ERROR, f"null values ({detail})", int(nulls.sum()))
-
-    ohlc = df[["open", "high", "low", "close"]]
-    valid = df[ohlc.notna().all(axis=1)]
-
-    # ── impossible prices ───────────────────────────────────────────────────
-    nonpositive = valid[(valid[["open", "high", "low", "close"]] <= 0).any(axis=1)]
-    if len(nonpositive):
-        report.add(
-            Check.IMPOSSIBLE_PRICE, Severity.ERROR, "non-positive prices",
-            len(nonpositive), tuple(str(t) for t in nonpositive.index[:3]),
-        )
-
-    # ── OHLC relationships ──────────────────────────────────────────────────
-    bad = valid[
-        (valid["high"] < valid[["open", "close"]].max(axis=1))
-        | (valid["low"] > valid[["open", "close"]].min(axis=1))
-        | (valid["high"] < valid["low"])
-    ]
-    if len(bad):
-        report.add(
-            Check.OHLC_RELATIONSHIP, Severity.ERROR,
-            "high/low inconsistent with open/close", len(bad),
-            tuple(str(t) for t in bad.index[:3]),
-        )
-
-    # ── volume ──────────────────────────────────────────────────────────────
-    vol = df["volume"].dropna()
-    if (vol < 0).any():
-        report.add(Check.ABNORMAL_VOLUME, Severity.ERROR, "negative volume", int((vol < 0).sum()))
-    zero_vol = int((vol == 0).sum())
-    if zero_vol:
-        report.add(
-            Check.ZERO_VOLUME, Severity.WARNING,
-            "zero-volume bars — often a halt, a holiday, or a padded row", zero_vol,
-        )
-    if len(vol) > 30:
-        # Rolling mean must be computed on the same index as `vol`, or the
-        # comparison silently misaligns. Shifted by one so a bar is judged
-        # against history that excludes itself.
-        baseline = vol.rolling(20, min_periods=10).mean().shift(1)
-        comparable = baseline.notna() & (baseline > 0)
-        spikes = vol[comparable & (vol > baseline * volume_spike_sigma)]
-        if len(spikes):
-            report.add(
-                Check.ABNORMAL_VOLUME, Severity.WARNING,
-                f"volume exceeding {volume_spike_sigma}x its 20-bar average", len(spikes),
-                tuple(str(t) for t in spikes.index[:3]),
-            )
-
-    # ── price gaps / suspected corporate actions ────────────────────────────
-    if len(valid) > 1:
-        change = valid["close"].pct_change().abs()
-        jumps = change[change > gap_threshold]
-        if len(jumps):
-            report.add(
-                Check.CORPORATE_ACTION, Severity.WARNING,
-                f"close moved >{gap_threshold:.0%} between bars — verify it is not an "
-                "unapplied split or bonus issue",
-                len(jumps), tuple(f"{t}: {v:.1%}" for t, v in jumps.head(3).items()),
-            )
-        overnight = (valid["open"] / valid["close"].shift(1) - 1).abs().dropna()
-        big = overnight[overnight > gap_threshold]
-        if len(big):
-            report.add(Check.GAPS, Severity.INFO, "large overnight gaps", len(big))
-
-    # ── frequency ───────────────────────────────────────────────────────────
-    if len(df.index) > 2:
-        deltas = pd.Series(df.index).diff().dropna()
-        modal = deltas.mode()
-        if len(modal):
-            report.add(
-                Check.FREQUENCY, Severity.INFO, f"modal bar interval is {modal.iloc[0]}"
-            )
-            if expected_freq is not None and modal.iloc[0] != pd.Timedelta(expected_freq):
-                report.add(
-                    Check.FREQUENCY, Severity.ERROR,
-                    f"expected {expected_freq} bars, data is mostly {modal.iloc[0]}",
-                )
-
-    # ── session alignment and missing candles ───────────────────────────────
-    if expected_sessions is not None and len(expected_sessions):
-        expected = pd.DatetimeIndex(expected_sessions).tz_convert("UTC")
-        present = df.index.normalize().unique()
-        exp_days = expected.normalize().unique()
-
-        missing = exp_days.difference(present)
-        if len(missing):
-            report.add(
-                Check.MISSING_CANDLES, Severity.WARNING,
-                "trading sessions with no bar", len(missing),
-                tuple(str(d.date()) for d in missing[:3]),
-            )
-        extra = present.difference(exp_days)
-        if len(extra):
-            report.add(
-                Check.SESSION_ALIGNMENT, Severity.ERROR,
-                "bars on dates the exchange was closed", len(extra),
-                tuple(str(d.date()) for d in extra[:3]),
-            )
-    else:
-        report.add(
-            Check.MISSING_CANDLES, Severity.INFO,
-            "skipped — no exchange calendar supplied, so gaps cannot be detected",
-        )
-
-    # ── staleness ───────────────────────────────────────────────────────────
-    if now is not None and max_staleness is not None:
-        age = now - df.index.max().to_pydatetime()
-        if age > max_staleness:
-            report.add(
-                Check.STALE_DATA, Severity.ERROR,
-                f"most recent bar is {age} old, limit is {max_staleness}",
-            )
+    valid = df[df[["open", "high", "low", "close"]].notna().all(axis=1)]
+    _check_prices(valid, report)
+    _check_volume(df, report, volume_spike_sigma)
+    _check_gaps(valid, report, gap_threshold)
+    _check_frequency(df, report, expected_freq)
+    _check_sessions(df, report, expected_sessions)
+    _check_staleness(df, report, now, max_staleness)
 
     return report
