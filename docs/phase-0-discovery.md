@@ -1,6 +1,6 @@
 # Phase 0 — Discovery & Architecture Proposal
 
-**Status:** Proposal, awaiting approval. No implementation has begun.
+**Status:** Proposal. Decisions §25 resolved — see the [Addendum](phase-0-addendum-decisions.md). No implementation has begun.
 **Date:** 2026-08-22
 
 **Evidence legend:** `[FACT]` verifiable · `[ASSUMPTION]` unverified · `[HYPOTHESIS]` untested
@@ -1544,6 +1544,9 @@ Indicator math will not be your bottleneck. Measure before optimising.
 
 ## 19. Development roadmap
 
+> ⚠️ **Superseded by the [Phase 0 Addendum](phase-0-addendum-decisions.md).** Market, timeframe and capital have since been decided (India + US · daily, intraday and options as separate tracks · under $5k initially), which revises this section.
+
+
 Adjusted from your proposal. **Three changes I'd argue for:**
 
 1. **A walking skeleton in Phase 1.** Build the thinnest possible end-to-end slice — one
@@ -1626,6 +1629,9 @@ the specific reason for idempotency, the `UNKNOWN` state, reconciliation and the
 ---
 
 ## 21. Recommended MVP
+
+> ⚠️ **Superseded by the [Phase 0 Addendum](phase-0-addendum-decisions.md).** Market, timeframe and capital have since been decided (India + US · daily, intraday and options as separate tracks · under $5k initially), which revises this section.
+
 
 > **One strategy family, one small universe, daily bars, backtested honestly, paper traded for
 > a quarter, with a dashboard that explains every decision.**
@@ -1777,6 +1783,9 @@ repository initialised with README, `.gitignore` and docs · the open decision l
 ---
 
 ## 25. Open decisions — I need your input
+
+> ⚠️ **Superseded by the [Phase 0 Addendum](phase-0-addendum-decisions.md).** Market, timeframe and capital have since been decided (India + US · daily, intraday and options as separate tracks · under $5k initially), which revises this section.
+
 
 Ordered by how much they block. The first two change the architecture; the rest change
 defaults I can pick for you if you'd rather not decide yet.

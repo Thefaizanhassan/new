@@ -7,14 +7,17 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 
 | | |
 |---|---|
-| **Current phase** | Phase 0 — Discovery & Architecture *(awaiting approval)* |
+| **Current phase** | Phase 0 — Discovery & Architecture *(decisions resolved, awaiting Phase 1 approval)* |
 | **Code written** | None yet, by design |
 | **Trading mode** | `RESEARCH` — live trading is not implemented and is disabled by default |
 
 ## Start here
 
 1. **[Phase 0 — Discovery & Architecture Proposal](docs/phase-0-discovery.md)** — the full design.
-2. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
+2. **[Phase 0 Addendum — Decisions Resolved](docs/phase-0-addendum-decisions.md)** — market, timeframe and
+   capital decided; the cost math those produce; revised roadmap. **Supersedes §19, §21 and §25 of the
+   main document.**
+3. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
 
 ## The one-paragraph version
 
