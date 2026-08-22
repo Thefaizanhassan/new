@@ -1,0 +1,22 @@
+# Postgres for the operational ledger, event log and registries (Phase 0 §6.2).
+# Port 5433 on the host so it never collides with a Postgres you already run.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading
+    ports:
+      - "5433:5432"
+    volumes:
+      - trading-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  trading-pgdata:

@@ -985,9 +985,9 @@ the one that would cost you money.
 
 ```python
 class Strategy(Protocol):
-    spec: StrategySpec                       # versioned, content-hashed identity
+    spec: StrategySpec  # versioned, content-hashed identity
 
-    def warmup_bars(self) -> int: ...        # bars needed before first valid signal
+    def warmup_bars(self) -> int: ...  # bars needed before first valid signal
     def on_bar(self, ctx: StrategyContext) -> list[Intent]: ...
     def on_fill(self, ctx: StrategyContext, fill: Fill) -> list[Intent]: ...
 ```
@@ -1017,10 +1017,10 @@ class StrategyContext:
 class Intent:
     symbol: str
     target: TargetWeight | TargetQty | Flat  # DECLARATIVE — a destination, not a step
-    confidence: Decimal | None               # 0–1, optional; used for sizing, never for bypass
-    urgency: Urgency                         # PATIENT | NORMAL | IMMEDIATE → order type
-    reason: str                              # human-readable, shown in the dashboard
-    evidence: dict[str, Any]                 # the feature values that drove it — the audit trail
+    confidence: Decimal | None  # 0–1, optional; used for sizing, never for bypass
+    urgency: Urgency  # PATIENT | NORMAL | IMMEDIATE → order type
+    reason: str  # human-readable, shown in the dashboard
+    evidence: dict[str, Any]  # the feature values that drove it — the audit trail
 ```
 
 `evidence` is what makes "why did it trade?" answerable months later, without re-running
@@ -1031,14 +1031,18 @@ anything.
 ```python
 @dataclass(frozen=True)
 class StrategySpec:
-    id: str; name: str; version: str                # semver
-    params: BaseModel                               # typed Pydantic model
-    universe: UniverseSpec                          # point-in-time resolvable
+    id: str
+    name: str
+    version: str  # semver
+    params: BaseModel  # typed Pydantic model
+    universe: UniverseSpec  # point-in-time resolvable
     timeframe: Timeframe
     data_requirements: list[DataRequirement]
-    cost_model_id: str                              # assumptions are part of identity
+    cost_model_id: str  # assumptions are part of identity
     lifecycle_status: LifecycleStatus
-    author: str; created_at: datetime; description: str
+    author: str
+    created_at: datetime
+    description: str
 
     @property
     def content_hash(self) -> str:
@@ -1282,7 +1286,7 @@ log is what makes §19's "why did it trade / why didn't it?" answerable.
 class Order:
     def __init__(self, *args, _decision: RiskDecision, **kw):
         if not isinstance(_decision, RiskDecision) or not _decision.approved:
-            raise UnauthorizedOrderError            # unreachable via the factory
+            raise UnauthorizedOrderError  # unreachable via the factory
 ```
 
 `RiskDecision` can only be minted by the risk engine. Constructing an order without one is
@@ -1417,10 +1421,10 @@ and its intents are scaled to fit. One strategy cannot consume the portfolio.
 
 ```python
 class TradingMode(StrEnum):
-    RESEARCH = "research"    # no orders, no broker connection at all
-    BACKTEST = "backtest"    # simulated clock, simulated broker
-    PAPER    = "paper"       # real clock, real data, simulated money
-    LIVE     = "live"        # REAL MONEY
+    RESEARCH = "research"  # no orders, no broker connection at all
+    BACKTEST = "backtest"  # simulated clock, simulated broker
+    PAPER = "paper"  # real clock, real data, simulated money
+    LIVE = "live"  # REAL MONEY
 ```
 
 **Default is `RESEARCH`.** `LIVE` requires *all* of: an explicit config value, an environment

@@ -1,0 +1,85 @@
+[project]
+name = "ai-trading-platform"
+version = "0.1.0"
+description = "Modular AI-assisted algorithmic trading platform — research, validation, and gated execution"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "structlog>=24.4",
+    "sqlalchemy>=2.0.35",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "exchange-calendars>=4.5",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "TA-Lib>=0.7.1",
+    "typer>=0.12",
+    "rich>=13.8",
+]
+
+[project.scripts]
+trading = "trading.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.112",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trading"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ANN", "PL"]
+ignore = [
+    "ANN401",   # Any is occasionally the honest annotation
+    "PLR0913",  # domain constructors legitimately take many fields
+    "PLR2004",  # magic values are readable in tests and financial formulas
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "PLR", "S101"]
+"scripts/**" = ["ANN", "PLR"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["trading"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strict typing where money is calculated; pragmatic elsewhere (Phase 0 §5.1).
+[tool.mypy]
+python_version = "3.12"
+files = ["src/trading"]
+plugins = ["pydantic.mypy"]
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "trading.core.*"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["exchange_calendars.*", "pandas.*"]
+ignore_missing_imports = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires a live Postgres (skipped unless TRADING_DATABASE_URL is set)",
+]
