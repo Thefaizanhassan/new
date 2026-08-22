@@ -9,7 +9,7 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 |---|---|
 | **Current phase** | Phase 1 — Foundation *(in progress; one architecture decision pending)* |
 | **Market** | India-first (NSE/BSE), US adapter at Phase 9 |
-| **Tests** | 75 passing · ruff, ruff-format and mypy clean |
+| **Tests** | 110 passing · ruff, ruff-format and mypy clean |
 | **Trading mode** | `RESEARCH` — `LIVE` is refused at startup and stays refused until Phase 12 |
 
 ## Start here
@@ -43,9 +43,21 @@ without a passing risk check. Plus the pandas data pipeline with a full validati
 delivery and intraday cost models, NSE/BSE calendars, SEBI and US compliance profiles, and
 environment-driven config that refuses `LIVE` mode outright.
 
-**Not built yet:** market data loading, indicators, strategies, the backtesting engine, the risk
-engine itself, paper trading, broker connections, the dashboard. **You cannot place a trade with
-this, by design.**
+Plus the Phase 1 walking skeleton: a yfinance adapter and a deterministic synthetic provider,
+eight documented TA-Lib indicators, two reference strategies, a pre-trade risk engine with a
+filesystem kill switch, and an end-to-end runner that produces an equity curve, a full decision
+chain and a reproducible run manifest.
+
+**Not built yet:** the real backtesting engine (slippage, spread, partial fills, volume caps),
+validation and walk-forward testing, paper trading, broker connections, and the dashboard.
+**You cannot place a trade with this, by design.**
+
+```bash
+uv run trading status                        # how this instance is configured
+uv run trading check-data --symbol RELIANCE  # load bars and run the validation gate
+uv run trading backtest --strategy sma_cross # the walking skeleton, end to end
+uv run trading indicators --name RSI         # what an indicator means and where it misleads
+```
 
 ## The one-paragraph version
 

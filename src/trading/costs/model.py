@@ -61,10 +61,18 @@ class CostContext:
 
 
 class CostModel(Protocol):
-    """A named, versioned cost model. The version is recorded in every run manifest."""
+    """A named, versioned cost model. The version is recorded in every run manifest.
 
-    model_id: str
-    version: str
+    ``model_id`` and ``version`` are read-only: implementations are frozen
+    dataclasses, and a cost model whose version could be mutated after a run
+    would make that run's manifest a lie.
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def version(self) -> str: ...
 
     def compute(self, ctx: CostContext) -> CostBreakdown:
         """Itemised charges for one execution."""

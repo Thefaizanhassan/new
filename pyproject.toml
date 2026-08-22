@@ -16,6 +16,7 @@ dependencies = [
     "TA-Lib>=0.7.1",
     "typer>=0.12",
     "rich>=13.8",
+    "yfinance>=1.6.0",
 ]
 
 [project.scripts]
@@ -49,11 +50,17 @@ ignore = [
     "ANN401",   # Any is occasionally the honest annotation
     "PLR0913",  # domain constructors legitimately take many fields
     "PLR2004",  # magic values are readable in tests and financial formulas
+    "RUF001",   # en dashes and arrows are deliberate in explanatory prose
+    "RUF002",
+    "RUF003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "PLR", "S101"]
 "scripts/**" = ["ANN", "PLR"]
+# Typer builds its CLI from the signature, so commands legitimately take many
+# keyword options; that is the framework's interface, not an code smell.
+"src/trading/cli.py" = ["PLR0913", "PLR0917"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trading"]
@@ -73,7 +80,7 @@ module = "trading.core.*"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["exchange_calendars.*", "pandas.*"]
+module = ["exchange_calendars.*", "pandas.*", "yfinance.*", "talib.*"]
 ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────────────────────

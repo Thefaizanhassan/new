@@ -16,7 +16,7 @@ Python 3.12 environment, not from memory.
 |---|---|---|
 | **Pandas** | ✅ **Accepted** | Already the design's choice. No argument. |
 | **TA-Lib** | ✅ **Accepted** | My earlier reservation was based on stale information. Corrected below. |
-| **Backtrader** | ⚠️ **Contested** — approval requested | Runs fine; but cannot be the *production* engine for an India-first system. Full case in §4. |
+| **Backtrader** | ✅ **Resolved 2026-08-22** — custom engine approved for production, backtrader retained as prototyping sandbox and Phase 5 cross-validation oracle. Full case in §4. |
 
 One correction I owe you up front: in the Phase 0 document I dismissed TA-Lib's install
 friction and steered toward hand-written indicators. **I tested it, and I was wrong** — TA-Lib
@@ -30,6 +30,7 @@ right call and I've adopted it.
 | Area | Your default | Evaluated against | Decision |
 |---|---|---|---|
 | Data analysis | Pandas | Polars, DuckDB | **Pandas** as the analytical interface; **DuckDB + Parquet** as the storage layer beneath it |
+| Market data source | — | yfinance, Kite Connect, synthetic | **yfinance (PROTOTYPE tier)** chosen 2026-08-22, with a synthetic `FixtureProvider` for tests and CI. See §9 |
 | Numerical | NumPy | — | **NumPy** (transitively via pandas and TA-Lib) |
 | Technical indicators | TA-Lib | pandas-ta, custom | **TA-Lib** ✅ |
 | Backtesting | Backtrader | vectorbt, NautilusTrader, custom | **Contested — see §4** |
@@ -286,9 +287,19 @@ you're learning. Nothing about the architecture stops you, and I'd encourage it.
 > the single most effective check on a backtester, and it turns backtrader from a dependency
 > into a *test asset* — used, respected, and not load-bearing.
 
-**Requested decision.** Approve the custom event-driven engine as production, with backtrader in
-roles ① and ②? Or overrule me and make backtrader primary — in which case I'll build it and
-document the two consequences above rather than relitigate.
+### 4.6 Decision — approved 2026-08-22
+
+**Custom event-driven engine as production; backtrader retained in roles ① and ②.**
+
+Consequences now binding on the implementation:
+
+* Strategies are written against `trading.strategies.base.Strategy`, never `bt.Strategy`, so one
+  implementation runs across backtest, paper and live including Kite Connect.
+* Phase 5 must include a **backtrader cross-validation test**: the same reference strategy
+  implemented both ways, fed identical bars and identical simple costs, with the equity curves
+  asserted equal within tolerance. If that test is skipped, this decision loses half its value.
+* backtrader is **not** in `pyproject.toml` dependencies. It is added as a dev-only dependency
+  when the Phase 5 cross-check is written, so it never sits in the production dependency tree.
 
 ---
 
@@ -372,3 +383,63 @@ shares but none owns.
 
 Version numbers, release dates and wheel tags were read from live PyPI metadata and from
 installs performed in this session, not from these articles.
+
+
+---
+
+## 9. Market data source — decided 2026-08-22
+
+**Chosen: yfinance**, with a synthetic fixture provider alongside it.
+
+**1. What it does.** Fetches historical bars from Yahoo Finance's undocumented endpoint.
+NSE symbols carry a `.NS` suffix (`RELIANCE.NS`), BSE `.BO`.
+
+**2. Why we need it.** Real Indian daily bars at zero cost, so the pipeline can be exercised
+against genuinely messy data before committing ₹500/month to Kite Connect.
+
+**3. What uses it.** The data layer only, as one implementation of `HistoricalDataProvider`.
+Nothing above the data layer knows it exists.
+
+**4. Alternatives.** Kite Connect (₹500/month, production-grade, the eventual live provider);
+a synthetic fixture provider (free, deterministic, but says nothing about a real market).
+
+**5. Why selected.** You chose it. I flagged the limitations below; the decision is recorded
+here rather than relitigated.
+
+**6. Limitations — and how they are contained.** No SLA, an undocumented endpoint that can
+change without notice, adjusted prices recomputed on every request (so history is not stable),
+no point-in-time guarantee, and terms-of-service ambiguity around programmatic use.
+
+These are contained rather than ignored:
+
+* The provider is tagged **`DataTier.PROTOTYPE`**, and the tier travels into every run manifest.
+  `DataTier.may_support_a_validated_strategy` is `False` for it, so a strategy cannot be
+  promoted past research on yfinance data — the limitation is enforced by the code, not by
+  memory.
+* `get_bars(..., as_of=...)` **raises `NotImplementedError`** rather than silently returning
+  today's view of history. A provider that cannot answer a point-in-time query must say so.
+* Raw prices are requested (`auto_adjust=False`); adjusted series are derived on read from a
+  separate factor table, never stored as truth.
+* Every bar passes the validation gate before reaching a strategy.
+
+**7. Suitability.** Research ✅ · Backtesting ⚠️ *prototype only, never for a promotion
+decision* · Paper ❌ · Live ❌.
+
+### The synthetic fixture provider
+
+`FixtureProvider` generates deterministic, calendar-aligned daily bars at `DataTier.SYNTHETIC`.
+It exists so the test suite and CI run offline: a test suite that needs the internet fails for
+reasons unrelated to your code.
+
+> **A bug worth recording.** The first version seeded its generator from Python's `hash()`,
+> which is randomised per process. Identical runs produced different "deterministic" data —
+> the exact reproducibility failure this project exists to prevent. It now seeds from `crc32`,
+> and a regression test asserts identical output across three separate interpreters.
+
+### Network note
+
+`fc.yahoo.com` is **blocked by this workspace's egress policy**, so yfinance cannot be
+exercised against the live endpoint from the development sandbox. The adapter is fully
+implemented and tested against recorded response shapes — including Yahoo's MultiIndex column
+layout — and will work on your Mac. Run `uv run trading check-data --source yfinance` locally
+to confirm.
