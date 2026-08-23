@@ -1,0 +1,31 @@
+# Risk limits, versioned so a backtest records what it ran under.
+#
+# The same strategy under a 10% position cap and a 25% cap is, in every way that
+# matters, two different strategies — so a run that does not record its limits is
+# not reproducible.
+#
+# Defaults here are deliberately tight. Loosening one should be a decision
+# someone made, not something inherited from a permissive default.
+profile_id: default
+version: "1.0.0"
+
+# Position and exposure
+max_position_weight: "0.25"
+max_gross_exposure: "0.80"
+max_net_exposure: "0.80"
+max_correlated_exposure: "0.60"   # cap on sqrt(wᵀCw) — what the book actually bets
+max_leverage: "1.0"               # 1.0 = no borrowing
+max_open_positions: 10
+max_strategy_allocation: "0.50"
+
+# Order sizing
+min_order_value: "1000"           # below this, flat fees dominate the trade
+max_limit_price_deviation: "0.05"
+max_adv_participation: "0.01"     # above ~1% of daily volume you move the price
+
+# Continuous limits
+max_daily_loss: "0.02"            # mark-to-market, including unrealised
+max_drawdown: "0.15"
+max_consecutive_losses: 8
+max_error_rate: 5
+max_data_age_seconds: 300

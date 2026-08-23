@@ -7,9 +7,9 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 
 | | |
 |---|---|
-| **Current phase** | Phase 3 — Strategy framework *(complete)* |
+| **Current phase** | Phase 4 — Risk engine *(complete)* |
 | **Market** | India-first (NSE/BSE), US adapter at Phase 9 |
-| **Tests** | 250 passing · ruff, ruff-format and mypy clean |
+| **Tests** | 301 passing · ruff, ruff-format and mypy clean |
 | **Trading mode** | `RESEARCH` — `LIVE` is refused at startup and stays refused until Phase 12 |
 
 ## Start here
@@ -24,8 +24,10 @@ algorithmic trading strategies — built so that **AI never directly controls mo
    different questions "as of" can mean.
 5. **[Writing Strategies](docs/strategy-guide.md)** — YAML and Python strategies, the restricted
    expression language, and lifecycle statuses you have to earn.
-6. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
-7. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
+6. **[Risk Management](docs/risk-guide.md)** — the rule set, correlation-adjusted exposure,
+   halt levels, and compliance enforced rather than documented.
+7. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
+8. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
 
 ## Quick start
 
@@ -62,6 +64,11 @@ faster, byte-identical results), a registry spanning Python and config strategie
 gates that refuse promotion — including refusing when the check that would answer a criterion
 does not exist yet. See [docs/strategy-guide.md](docs/strategy-guide.md).
 
+And the Phase 4 risk engine: 21 pre-trade rules and 5 continuous monitors, correlation-adjusted
+exposure so correlated positions consume the budget they actually use, a halt state that never
+clears itself, and SEBI/PDT compliance enforced as risk rules. Fails closed throughout — a rule
+that raises is a rejection, never a skip. See [docs/risk-guide.md](docs/risk-guide.md).
+
 **Not built yet:** the real backtesting engine (slippage, spread, partial fills, volume caps),
 validation and walk-forward testing, paper trading, broker connections, and the dashboard.
 **You cannot place a trade with this, by design.**
@@ -78,6 +85,9 @@ uv run trading strategies                        # every registered strategy
 uv run trading strategy-language                 # what a YAML rule may contain
 uv run trading validate-strategy <path.yaml>     # does it compile, and is it causal?
 uv run trading lifecycle --to-status PROMISING   # what blocks a promotion
+uv run trading risk-rules                        # every pre-trade rule and monitor
+uv run trading risk-profile <path.yaml>          # limits, and what each protects against
+uv run trading halt-drill                        # exercise the kill switch
 ```
 
 ## The one-paragraph version

@@ -1,0 +1,25 @@
+# For a small account, where fixed costs and a single bad position matter more.
+#
+# At ₹4L, a 25% position is ₹1L and the flat depository fee is negligible; at 5%
+# it is ₹20,000 and the fee starts to bite. These limits trade diversification
+# against per-trade cost efficiency, which is the real tension at small capital.
+profile_id: conservative
+version: "1.0.0"
+
+max_position_weight: "0.10"
+max_gross_exposure: "0.50"
+max_net_exposure: "0.50"
+max_correlated_exposure: "0.35"
+max_leverage: "1.0"
+max_open_positions: 5
+max_strategy_allocation: "0.30"
+
+min_order_value: "10000"          # ₹10,000 floor: below it the DP fee is >0.15%
+max_limit_price_deviation: "0.02"
+max_adv_participation: "0.005"
+
+max_daily_loss: "0.01"
+max_drawdown: "0.08"
+max_consecutive_losses: 5
+max_error_rate: 3
+max_data_age_seconds: 120

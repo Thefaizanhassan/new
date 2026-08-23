@@ -34,7 +34,9 @@ from trading.engine.runner import RunResult, WalkingSkeletonRunner
 from trading.features import indicators as ind
 from trading.features.engine import verify_causality
 from trading.observability.logging import configure_logging
-from trading.risk.engine import RiskEngine, RiskLimits
+from trading.risk.engine import RiskEngine
+from trading.risk.monitors import HaltLevel
+from trading.risk.profiles import RiskLimits, load_risk_profile
 from trading.strategies import expressions
 from trading.strategies.base import LifecycleStatus
 from trading.strategies.builtin import BuyAndHold, SmaCross
@@ -369,6 +371,80 @@ def lifecycle(
 
 
 @app.command()
+def risk_rules(profile: str = "") -> None:
+    """Every pre-trade rule, in evaluation order, with what each one is for."""
+    limits = load_risk_profile(profile) if profile else RiskLimits()
+    engine = RiskEngine(limits, profile_for(Settings().market), kill_switch_path=Path("KILL"))
+
+    table = Table(
+        title=f"{len(engine.rules)} pre-trade rules — profile '{limits.profile_id}'",
+        title_justify="left",
+    )
+    table.add_column("Rule", style="bold cyan")
+    table.add_column("Purpose")
+    for rule in engine.describe_rules():
+        table.add_row(rule["rule_id"], rule["doc"] or "—")
+    console.print(table)
+
+    monitors = Table(title="Continuous monitors", title_justify="left")
+    monitors.add_column("Monitor", style="bold cyan")
+    monitors.add_column("Halts at")
+    for monitor in engine.monitors.monitors:
+        doc = (type(monitor).__doc__ or "").strip().split("\n")[0]
+        monitors.add_row(monitor.monitor_id, doc or "—")
+    console.print()
+    console.print(monitors)
+    console.print(
+        "\n[dim]A rule that raises is a rejection, never a skip. A halt outranks "
+        "every rule and never clears itself.[/dim]"
+    )
+
+
+@app.command()
+def risk_profile(path: str = "configs/risk/default.yaml") -> None:
+    """Show a risk profile and what each limit is protecting against."""
+    limits = load_risk_profile(path)
+    table = Table(
+        title=f"Risk profile '{limits.profile_id}' v{limits.version}", title_justify="left"
+    )
+    table.add_column("Limit", style="bold cyan")
+    table.add_column("Value", justify="right")
+    for key, value in limits.model_dump().items():
+        if key in ("profile_id", "version") or value in ((), None):
+            continue
+        table.add_row(key, str(value))
+    console.print(table)
+    console.print(
+        "\n[dim]Recorded in every run manifest. The same strategy under a 10% and a "
+        "25% position cap is two different strategies.[/dim]"
+    )
+
+
+@app.command()
+def halt_drill(profile: str = "configs/risk/default.yaml") -> None:
+    """Exercise the halt path. An undrilled kill switch is an assumption, not a control."""
+    limits = load_risk_profile(profile)
+    engine = RiskEngine(limits, profile_for(Settings().market), kill_switch_path=Path("KILL"))
+    now = dt.datetime.now(dt.UTC)
+
+    console.print(f"Initial state: [green]{engine.halt.summary()}[/green]")
+    engine.engage_halt(HaltLevel.HARD, "drill: operator-initiated", now)
+    console.print(f"After engage:  [red]{engine.halt.summary()}[/red]")
+    console.print(f"  blocks new positions : {engine.halt.level.blocks_new_positions}")
+    console.print(f"  blocks everything    : {engine.halt.level.blocks_everything}")
+    console.print(
+        "  [yellow]does NOT auto-liquidate[/yellow] — force-closing into the chaos that "
+        "caused the halt is frequently worse than holding"
+    )
+    engine.release_halt(acknowledged_by="halt-drill")
+    console.print(f"After release: [green]{engine.halt.summary()}[/green]")
+    console.print(
+        "\n[dim]A halt never clears itself: whatever tripped it needs a human to look, "
+        "and an automatic resume would re-enter the situation that caused it.[/dim]"
+    )
+
+
+@app.command()
 def backtest(
     symbol: str = "RELIANCE",
     strategy: str = "sma_cross",
@@ -379,6 +455,7 @@ def backtest(
     weight: float = 0.20,
     show_decisions: int = 10,
     adjustment: str = "SPLIT_ONLY",
+    risk_profile_path: str = "",
 ) -> None:
     """Run the walking skeleton end to end.
 
@@ -412,7 +489,11 @@ def backtest(
         instrument=instrument,
         strategy=strat,
         cost_model=IndiaDeliveryEquityCosts(),
-        risk_engine=RiskEngine(RiskLimits(), compliance, kill_switch_path=Path("KILL")),
+        risk_engine=RiskEngine(
+            load_risk_profile(risk_profile_path) if risk_profile_path else RiskLimits(),
+            compliance,
+            kill_switch_path=Path("KILL"),
+        ),
         compliance=compliance,
         starting_capital=Money(Decimal(str(capital)), instrument.currency),
         mode=TradingMode.BACKTEST,
@@ -434,6 +515,9 @@ def _render(result: RunResult, strategy_name: str, show_decisions: int) -> None:
     summary.add_row("Cost drag", f"{result.cost_drag:.2%}")
     summary.add_row("Fills", str(len(result.fills)))
     summary.add_row("Risk rejections", str(len(result.rejections)))
+    summary.add_row(
+        "Halt", result.halt_summary if not result.halted else f"[red]{result.halt_summary}[/red]"
+    )
     console.print(summary)
 
     if show_decisions:

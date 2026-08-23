@@ -12,7 +12,8 @@ from trading.core.types import Currency, InstrumentClass, Money, TradingMode
 from trading.costs.india import IndiaDeliveryEquityCosts
 from trading.data.fixture import FixtureProvider
 from trading.engine.runner import WalkingSkeletonRunner
-from trading.risk.engine import RiskEngine, RiskLimits
+from trading.risk.engine import RiskEngine
+from trading.risk.profiles import RiskLimits
 from trading.strategies.builtin import BuyAndHold, SmaCross
 from trading.strategies.config_strategy import load_strategy
 
@@ -216,3 +217,45 @@ def test_a_python_strategy_without_declared_features_still_runs(instrument):
     result = build(instrument, BuyAndHold(instrument.id, Decimal("0.20"))).run(START, END)
     assert result.manifest["features_precomputed"] == "none"
     assert len(result.fills) == 1
+
+
+# ── risk engine, end to end ────────────────────────────────────────────────
+def test_a_drawdown_breach_halts_trading_mid_run(instrument):
+    """The monitor stops the run, and the halt is visible in the result."""
+    result = build(
+        instrument,
+        SmaCross(instrument.id, 50, 200, Decimal("0.20")),
+        limits=RiskLimits(max_drawdown=Decimal("0.03")),
+    ).run(START, END)
+
+    assert result.halted
+    assert "MON_002_drawdown" in result.halt_summary
+    assert any(d.kind == "HALT" for d in result.decisions)
+    unhalted = build(instrument, SmaCross(instrument.id, 50, 200, Decimal("0.20"))).run(START, END)
+    assert len(result.fills) < len(unhalted.fills)
+
+
+def test_exits_are_not_blocked_by_the_position_limit_in_a_real_run(instrument):
+    """Regression: every exit was rejected because closing read as doubling."""
+    result = build(instrument, SmaCross(instrument.id, 50, 200, Decimal("0.20"))).run(START, END)
+    sells = [f for f in result.fills if str(f.side) == "SELL"]
+    assert sells, "the strategy must be able to close what it opened"
+    assert not any("max_position_weight" in r.detail for r in result.rejections)
+
+
+def test_the_manifest_records_the_risk_profile_it_ran_under(instrument):
+    result = build(instrument, BuyAndHold(instrument.id, Decimal("0.20"))).run(START, END)
+    assert result.manifest["risk_profile_id"] == "default"
+    assert result.manifest["risk_profile_version"]
+    assert int(result.manifest["risk_rules"]) >= 20
+
+
+def test_a_tight_position_cap_rejects_everything_and_says_which_rule(instrument):
+    result = build(
+        instrument,
+        BuyAndHold(instrument.id, Decimal("0.95")),
+        limits=RiskLimits(max_position_weight=Decimal("0.10")),
+    ).run(START, END)
+    assert not result.fills
+    assert result.rejections
+    assert "max_position_weight" in result.rejections[0].detail
