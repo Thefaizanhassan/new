@@ -7,9 +7,9 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 
 | | |
 |---|---|
-| **Current phase** | Phase 2 — Market data layer *(complete)* |
+| **Current phase** | Phase 3 — Strategy framework *(complete)* |
 | **Market** | India-first (NSE/BSE), US adapter at Phase 9 |
-| **Tests** | 172 passing · ruff, ruff-format and mypy clean |
+| **Tests** | 250 passing · ruff, ruff-format and mypy clean |
 | **Trading mode** | `RESEARCH` — `LIVE` is refused at startup and stays refused until Phase 12 |
 
 ## Start here
@@ -22,8 +22,10 @@ algorithmic trading strategies — built so that **AI never directly controls mo
    against verified current status. **Contains one decision awaiting your approval.**
 4. **[The Data Layer](docs/data-layer.md)** — bitemporal storage, corporate actions, and the two
    different questions "as of" can mean.
-5. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
-6. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
+5. **[Writing Strategies](docs/strategy-guide.md)** — YAML and Python strategies, the restricted
+   expression language, and lifecycle statuses you have to earn.
+6. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
+7. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
 
 ## Quick start
 
@@ -54,6 +56,12 @@ actions applied on read while raw prices stay immutable, resumable chunked backf
 quarantine, and a data-trust tier that travels with the bars and cannot be laundered by
 storage. See [docs/data-layer.md](docs/data-layer.md).
 
+And the Phase 3 strategy framework: YAML strategies written in a restricted expression language
+that rejects code execution at compile time, a feature engine that precomputes causally (21×
+faster, byte-identical results), a registry spanning Python and config strategies, and lifecycle
+gates that refuse promotion — including refusing when the check that would answer a criterion
+does not exist yet. See [docs/strategy-guide.md](docs/strategy-guide.md).
+
 **Not built yet:** the real backtesting engine (slippage, spread, partial fills, volume caps),
 validation and walk-forward testing, paper trading, broker connections, and the dashboard.
 **You cannot place a trade with this, by design.**
@@ -66,6 +74,10 @@ uv run trading actions --symbol RELIANCE         # record and list corporate act
 uv run trading check-data --symbol RELIANCE      # run the validation gate
 uv run trading backtest --source store           # end to end, split-adjusted, from disk
 uv run trading indicators --name RSI             # what it means and where it misleads
+uv run trading strategies                        # every registered strategy
+uv run trading strategy-language                 # what a YAML rule may contain
+uv run trading validate-strategy <path.yaml>     # does it compile, and is it causal?
+uv run trading lifecycle --to-status PROMISING   # what blocks a promotion
 ```
 
 ## The one-paragraph version

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import pandas as pd
 import typer
@@ -32,9 +32,15 @@ from trading.data.store_provider import StoreBackedProvider
 from trading.data.validation import Severity, validate_ohlcv
 from trading.engine.runner import RunResult, WalkingSkeletonRunner
 from trading.features import indicators as ind
+from trading.features.engine import verify_causality
 from trading.observability.logging import configure_logging
 from trading.risk.engine import RiskEngine, RiskLimits
+from trading.strategies import expressions
+from trading.strategies.base import LifecycleStatus
 from trading.strategies.builtin import BuyAndHold, SmaCross
+from trading.strategies.config_strategy import load_strategy
+from trading.strategies.lifecycle import Evidence, evaluate_promotion
+from trading.strategies.registry import default_registry
 
 app = typer.Typer(add_completion=False, help="AI algorithmic trading platform")
 console = Console()
@@ -263,6 +269,106 @@ def actions(
 
 
 @app.command()
+def strategies(config_dir: str = "configs/strategies") -> None:
+    """List every registered strategy, from Python and from YAML."""
+    registry = default_registry(config_dir)
+    if not len(registry):
+        console.print("[yellow]No strategies registered.[/yellow]")
+        return
+
+    table = Table(title=f"{len(registry)} registered strategies", title_justify="left")
+    for column in ("ID", "Ver", "Status", "Universe", "Hash", "Origin"):
+        table.add_column(column)
+    for row in registry.summary():
+        table.add_row(
+            row["id"],
+            row["version"],
+            row["status"],
+            row["universe"],
+            row["content_hash"],
+            row["origin"].replace("configs/strategies/", ""),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Hash covers parameters, universe and timeframe. Change any of them and "
+        "you have a different strategy, with a different backtest identity.[/dim]"
+    )
+
+
+@app.command()
+def strategy_language() -> None:
+    """What a YAML strategy rule may contain — and what it deliberately may not."""
+    console.print(expressions.describe_language())
+
+
+@app.command()
+def validate_strategy(path: str, source: str = "fixture", symbol: str = "") -> None:
+    """Check a YAML strategy: does it compile, and are its rules causal?"""
+    try:
+        strategy = load_strategy(path)
+    except Exception as exc:
+        console.print(f"[red]Invalid:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Compiles[/green] — {strategy.spec.name} v{strategy.spec.version}")
+    console.print(f"  content hash : {strategy.spec.content_hash}")
+    console.print(f"  entry rule   : {strategy.config.entry.when}")
+    console.print(f"  exit rule    : {strategy.config.exit.when}")
+
+    instrument = _instrument(symbol or str(strategy.spec.universe[0]))
+    bars = _provider(source).get_bars(instrument.id, dt.date(2020, 1, 1), dt.date(2026, 8, 21))
+    if bars.empty:
+        console.print("[yellow]No bars available, so rules were not exercised.[/yellow]")
+        return
+
+    console.print("\n[bold]Causality[/bold] [dim](does a rule read the future?)[/dim]")
+    all_causal = True
+    for spec in strategy.feature_specs():
+        causal = verify_causality(spec, bars)
+        all_causal &= causal
+        mark = "[green]PASS[/green]" if causal else "[red]FAIL — reads the future[/red]"
+        console.print(f"  {spec.name:<8} {mark}")
+
+    fired = strategy.explain(bars)
+    console.print(
+        f"\n[bold]Over {len(bars)} bars[/bold]: entry fired {int(fired['entry'].sum())}x, "
+        f"exit fired {int(fired['exit'].sum())}x"
+    )
+    if int(fired["entry"].sum()) == 0:
+        console.print(
+            "[yellow]The entry rule never fired. Check it against "
+            "`trading strategy-language` — the rolling_max trap is a common cause.[/yellow]"
+        )
+    if not all_causal:
+        raise typer.Exit(1)
+
+
+@app.command()
+def lifecycle(
+    strategy_id: str = "sma_cross",
+    to_status: str = "PROMISING",
+    from_status: str = "BACKTESTING",
+    data_tier: str = "PROTOTYPE",
+) -> None:
+    """Ask whether a strategy may be promoted, and see exactly what blocks it."""
+    decision = evaluate_promotion(
+        strategy_id,
+        LifecycleStatus(from_status),
+        LifecycleStatus(to_status),
+        Evidence(data_tier=DataTier(data_tier)),
+    )
+    colour = "green" if decision.approved else "red"
+    console.print(f"[{colour}]{decision.summary()}[/{colour}]\n")
+    for result in decision.results:
+        tone = {"PASS": "green", "FAIL": "red", "UNAVAILABLE": "yellow"}[result.status]
+        console.print(f"  [{tone}]{result}[/{tone}]")
+    console.print(
+        "\n[dim]UNAVAILABLE blocks promotion. A gate that passes because nobody "
+        "implemented its check manufactures confidence.[/dim]"
+    )
+
+
+@app.command()
 def backtest(
     symbol: str = "RELIANCE",
     strategy: str = "sma_cross",
@@ -283,16 +389,22 @@ def backtest(
     settings = Settings()
     configure_logging(settings.log_level, settings.log_format)
 
-    if strategy not in _STRATEGIES:
-        raise typer.BadParameter(f"Unknown strategy {strategy!r}. Choose from {_STRATEGIES}.")
-
     instrument = _instrument(symbol)
     target = Decimal(str(weight))
-    strat = (
-        BuyAndHold(instrument.id, target_weight=target)
-        if strategy == "buy_and_hold"
-        else SmaCross(instrument.id, fast=50, slow=200, target_weight=target)
-    )
+    if strategy == "buy_and_hold":
+        strat: Any = BuyAndHold(instrument.id, target_weight=target)
+    elif strategy == "sma_cross":
+        strat = SmaCross(instrument.id, fast=50, slow=200, target_weight=target)
+    else:
+        # Anything else is looked up in the registry, so a YAML strategy runs
+        # through exactly the same path as a Python one.
+        try:
+            strat = default_registry().build(strategy)
+        except KeyError as exc:
+            raise typer.BadParameter(
+                f"Unknown strategy {strategy!r}. Built in: {_STRATEGIES}. "
+                f"Run `trading strategies` to see what is registered."
+            ) from exc
     compliance = profile_for(instrument.market)
 
     result = WalkingSkeletonRunner(

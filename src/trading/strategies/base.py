@@ -94,7 +94,7 @@ class StrategyContext:
     cannot return future data because this object never received any.
     """
 
-    __slots__ = ("_equity", "_history", "_now", "_positions")
+    __slots__ = ("_equity", "_features", "_history", "_now", "_positions")
 
     def __init__(
         self,
@@ -102,11 +102,13 @@ class StrategyContext:
         history: dict[InstrumentId, pd.DataFrame],
         positions: dict[InstrumentId, Position],
         equity: Money,
+        features: dict[InstrumentId, pd.DataFrame] | None = None,
     ) -> None:
         self._now = now
         self._history = history
         self._positions = positions
         self._equity = equity
+        self._features = features or {}
 
     @property
     def now(self) -> datetime:
@@ -120,6 +122,17 @@ class StrategyContext:
     def history(self, instrument_id: InstrumentId, bars: int | None = None) -> pd.DataFrame:
         """Bars up to and including ``now``. Never beyond it."""
         frame = self._history.get(instrument_id)
+        if frame is None:
+            return pd.DataFrame()
+        return frame if bars is None else frame.tail(bars)
+
+    def features(self, instrument_id: InstrumentId, bars: int | None = None) -> pd.DataFrame:
+        """Precomputed features up to and including ``now``. Never beyond it.
+
+        Empty when the engine did not precompute, in which case a strategy
+        computes what it needs from :meth:`history` instead.
+        """
+        frame = self._features.get(instrument_id)
         if frame is None:
             return pd.DataFrame()
         return frame if bars is None else frame.tail(bars)

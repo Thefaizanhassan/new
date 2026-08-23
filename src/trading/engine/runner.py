@@ -39,6 +39,7 @@ from trading.core.types import Money, Side, TradingMode
 from trading.costs.model import CostContext, CostModel, SessionCostState
 from trading.data.provider import HistoricalDataProvider
 from trading.data.validation import DataQualityReport, validate_ohlcv
+from trading.features.engine import FeatureEngine
 from trading.observability.logging import get_logger
 from trading.risk.engine import RiskEngine, RiskInputs
 from trading.strategies.base import Strategy, StrategyContext
@@ -108,6 +109,7 @@ class WalkingSkeletonRunner:
         compliance: ComplianceProfile,
         starting_capital: Money,
         mode: TradingMode = TradingMode.BACKTEST,
+        feature_engine: FeatureEngine | None = None,
     ) -> None:
         self.provider = provider
         self.instrument = instrument
@@ -117,6 +119,19 @@ class WalkingSkeletonRunner:
         self.compliance = compliance
         self.starting_capital = starting_capital
         self.mode = mode
+        # A strategy may declare the features it needs so they can be computed
+        # once over the whole history instead of recomputed on every bar. This
+        # is only safe because every feature in the expression language is
+        # causal — verified by `features.engine.verify_causality`.
+        self._feature_engine = feature_engine or self._engine_from(strategy)
+
+    @staticmethod
+    def _engine_from(strategy: Strategy) -> FeatureEngine | None:
+        specs = getattr(strategy, "feature_specs", None)
+        if not callable(specs):
+            return None
+        declared = specs()
+        return FeatureEngine(declared) if declared else None
 
     def run(self, start: dt.date, end: dt.date) -> RunResult:
         bars = self.provider.get_bars(self.instrument.id, start, end)
@@ -138,6 +153,10 @@ class WalkingSkeletonRunner:
         session = SessionCostState(session_date=start)
 
         warmup = self.strategy.warmup_bars()
+        # Computed once over the full history, then sliced per bar. Slicing a
+        # causal feature to `now` yields exactly what computing it on truncated
+        # history would, which is what makes this safe rather than look-ahead.
+        features = self._feature_engine.compute(bars) if self._feature_engine is not None else None
 
         for i, (timestamp, bar) in enumerate(bars.iterrows()):
             now, open_price, close_price = self._bar_values(timestamp, bar)
@@ -175,6 +194,9 @@ class WalkingSkeletonRunner:
                 history={self.instrument.id: bars.iloc[: i + 1]},
                 positions={self.instrument.id: position},
                 equity=equity,
+                features=(
+                    {self.instrument.id: features.iloc[: i + 1]} if features is not None else None
+                ),
             )
             intents = self.strategy.on_bar(ctx, self.instrument)
             if not intents:
@@ -444,5 +466,8 @@ class WalkingSkeletonRunner:
             "bars": str(bars),
             "starting_capital": str(self.starting_capital.amount),
             "fill_convention": "signal at bar N close, fill at bar N+1 open",
+            "features_precomputed": (
+                ",".join(self._feature_engine.names) if self._feature_engine else "none"
+            ),
             "engine": "walking_skeleton_phase1",
         }

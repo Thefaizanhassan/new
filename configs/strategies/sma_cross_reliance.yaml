@@ -1,0 +1,20 @@
+# A config-defined strategy. No Python, no code deploy to change a parameter.
+# Rules use the restricted expression language — run `trading strategy-language`
+# to see what it supports and, more usefully, what it deliberately does not.
+id: sma_cross_reliance
+name: SMA Crossover — Reliance
+version: 1.0.0
+description: >
+  Long while the 50-day average is above the 200-day. The textbook trend-following
+  rule. Included because its failure mode is instructive: it whipsaws in ranging
+  markets, and at Indian delivery costs each false crossing is a real, measured loss.
+author: reference
+universe: [NSE:RELIANCE]
+timeframe: 1d
+warmup_bars: 201
+entry:
+  when: crossed_above(sma(close, 50), sma(close, 200))
+  target_weight: 0.20
+exit:
+  when: crossed_below(sma(close, 50), sma(close, 200))
+lifecycle_status: RESEARCH

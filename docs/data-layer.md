@@ -46,8 +46,8 @@ stores both the time it *refers to* and the time we *ingested* it, and a read ca
 either the latest view or an earlier one.
 
 ```python
-store.read(RELIANCE)                                   # latest known
-store.read(RELIANCE, as_of=datetime(2024, 7, 15, ...)) # what we knew that day
+store.read(RELIANCE)  # latest known
+store.read(RELIANCE, as_of=datetime(2024, 7, 15, ...))  # what we knew that day
 ```
 
 ### 3. "As of" is two questions, not one

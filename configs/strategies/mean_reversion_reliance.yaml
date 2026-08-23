@@ -1,0 +1,23 @@
+# Mean reversion, with a trend filter.
+#
+# Buying every dip is how mean-reversion strategies die: in a downtrend the price
+# is cheap for a reason, and "oversold" stays oversold for weeks. The
+# `close > sma(close, 200)` term restricts the trade to instruments that are still
+# in an uptrend, which is the difference between mean reversion and catching a
+# falling knife.
+id: mean_reversion_reliance
+name: Z-Score Mean Reversion — Reliance
+version: 1.0.0
+description: >
+  Buy when price is more than 2 standard deviations below its 20-day mean, but only
+  while the long-term trend is still up. Exit when it reverts to the mean.
+author: reference
+universe: [NSE:RELIANCE]
+timeframe: 1d
+warmup_bars: 201
+entry:
+  when: zscore(close, 20) < -2.0 and close > sma(close, 200)
+  target_weight: 0.20
+exit:
+  when: zscore(close, 20) > 0.0
+lifecycle_status: RESEARCH
