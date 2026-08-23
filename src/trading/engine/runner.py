@@ -29,11 +29,13 @@ from typing import Any
 
 import pandas as pd
 
+from trading.backtest.fills import FillOutcome, FillRequest, RealisticFillModel
+from trading.backtest.metrics import PerformanceReport, Trade, compute_metrics, extract_trades
 from trading.config.compliance import ComplianceProfile
 from trading.core.fill import Fill
 from trading.core.instrument import Instrument
 from trading.core.intent import Flat, Intent, TargetQty, TargetWeight
-from trading.core.order import Order, OrderRequest, OrderState
+from trading.core.order import Order, OrderRequest
 from trading.core.position import Position
 from trading.core.types import Money, Side, TradingMode
 from trading.costs.model import CostContext, CostModel, SessionCostState
@@ -81,6 +83,9 @@ class RunResult:
     total_costs: Money
     halt_summary: str = "NORMAL"
     monitor_events: list[MonitorResult] = field(default_factory=list)
+    trades: list[Trade] = field(default_factory=list)
+    metrics: PerformanceReport = field(default_factory=PerformanceReport)
+    unfilled: list[DecisionRecord] = field(default_factory=list)
 
     @property
     def gross_return(self) -> Decimal:
@@ -118,6 +123,8 @@ class WalkingSkeletonRunner:
         starting_capital: Money,
         mode: TradingMode = TradingMode.BACKTEST,
         feature_engine: FeatureEngine | None = None,
+        fill_model: RealisticFillModel | None = None,
+        trials: int = 1,
     ) -> None:
         self.provider = provider
         self.instrument = instrument
@@ -132,6 +139,11 @@ class WalkingSkeletonRunner:
         # is only safe because every feature in the expression language is
         # causal — verified by `features.engine.verify_causality`.
         self._feature_engine = feature_engine or self._engine_from(strategy)
+        self.fill_model = fill_model or RealisticFillModel()
+        # How many strategy variants were tried to arrive here. Feeds the
+        # deflated Sharpe ratio: reporting the best of many trials without
+        # saying how many is how a lucky draw becomes a "discovery".
+        self.trials = trials
 
     @staticmethod
     def _engine_from(strategy: Strategy) -> FeatureEngine | None:
@@ -160,6 +172,8 @@ class WalkingSkeletonRunner:
         pending: Order | None = None
         session = SessionCostState(session_date=start)
         recent_orders: list[OrderRecord] = []
+        unfilled: list[DecisionRecord] = []
+        previous_close: Decimal | None = None
         day_start_equity = self.starting_capital
         peak_equity = self.starting_capital
         current_date = start
@@ -176,21 +190,24 @@ class WalkingSkeletonRunner:
         advs = bars["volume"].rolling(20, min_periods=5).mean().shift(1)
 
         for i, (timestamp, bar) in enumerate(bars.iterrows()):
-            now, open_price, close_price = self._bar_values(timestamp, bar)
+            now, close_price = self._bar_values(timestamp, bar)
 
             # ── 1. execute any order raised on the previous bar's close ─────
             if pending is not None:
                 if session.session_date != now.date():
                     session = SessionCostState(session_date=now.date())
-                fill = self._execute(pending, open_price, now, session)
-                position, cash, total_costs = self._apply_fill(
-                    fill,
-                    position,
-                    cash,
-                    total_costs,
+                position, cash, total_costs = self._settle(
+                    pending,
+                    bar,
+                    previous_close,
+                    now,
+                    session,
+                    position=position,
+                    cash=cash,
+                    total_costs=total_costs,
                     fills=fills,
                     decisions=decisions,
-                    now=now,
+                    unfilled=unfilled,
                 )
                 pending = None
 
@@ -221,6 +238,8 @@ class WalkingSkeletonRunner:
                     total_costs=total_costs,
                 )
             )
+
+            previous_close = close_price
 
             if i < warmup or i == len(bars) - 1:
                 continue
@@ -253,35 +272,77 @@ class WalkingSkeletonRunner:
                 adv=advs.iloc[i] if advs is not None else None,
             )
 
+        return self._assemble(
+            start=start,
+            end=end,
+            bars=bars,
+            equity_rows=equity_rows,
+            fills=fills,
+            decisions=decisions,
+            quality=quality,
+            cash=cash,
+            position=position,
+            total_costs=total_costs,
+            monitor_events=monitor_events,
+            unfilled=unfilled,
+        )
+
+    def _assemble(
+        self,
+        *,
+        start: dt.date,
+        end: dt.date,
+        bars: pd.DataFrame,
+        equity_rows: list[dict[str, Any]],
+        fills: list[Fill],
+        decisions: list[DecisionRecord],
+        quality: DataQualityReport,
+        cash: Money,
+        position: Position,
+        total_costs: Money,
+        monitor_events: list[MonitorResult],
+        unfilled: list[DecisionRecord],
+    ) -> RunResult:
+        """Close the books and compute the full metric set."""
         final_price = Decimal(str(bars["close"].iloc[-1]))
-        final_equity = cash + position.market_value(final_price)
+        curve = pd.DataFrame(equity_rows).set_index("timestamp")
+        trades = extract_trades(fills)
+        # Buy-and-hold of the same instrument: the bar every strategy has to
+        # clear after costs, and most do not.
+        benchmark = bars["close"].pct_change().dropna()
 
         return RunResult(
             manifest=self._manifest(start, end, len(bars)),
-            equity_curve=pd.DataFrame(equity_rows).set_index("timestamp"),
+            equity_curve=curve,
             fills=fills,
             decisions=decisions,
             data_quality=quality,
             starting_capital=self.starting_capital,
-            final_equity=final_equity,
+            final_equity=cash + position.market_value(final_price),
             total_costs=total_costs,
             halt_summary=self.risk_engine.halt.summary(),
             monitor_events=monitor_events,
+            trades=trades,
+            unfilled=unfilled,
+            metrics=compute_metrics(
+                curve,
+                trades,
+                starting_capital=self.starting_capital.amount,
+                total_costs=total_costs.amount,
+                benchmark=benchmark,
+                trials=self.trials,
+            ),
         )
 
     # ── helpers ─────────────────────────────────────────────────────────────
     @staticmethod
-    def _bar_values(timestamp: Any, bar: Any) -> tuple[dt.datetime, Decimal, Decimal]:
+    def _bar_values(timestamp: Any, bar: Any) -> tuple[dt.datetime, Decimal]:
         """Pull the three values the loop needs, converting to Decimal at the edge.
 
         This is the pandas/Decimal boundary: floats stop here and everything
         downstream is exact.
         """
-        return (
-            timestamp.to_pydatetime(),
-            Decimal(str(bar["open"])),
-            Decimal(str(bar["close"])),
-        )
+        return timestamp.to_pydatetime(), Decimal(str(bar["close"]))
 
     @staticmethod
     def _apply_fill(
@@ -496,32 +557,96 @@ class WalkingSkeletonRunner:
             reason=intent.reason,
         )
 
+    def _settle(
+        self,
+        order: Order,
+        bar: Any,
+        previous_close: Decimal | None,
+        now: dt.datetime,
+        session: SessionCostState,
+        *,
+        position: Position,
+        cash: Money,
+        total_costs: Money,
+        fills: list[Fill],
+        decisions: list[DecisionRecord],
+        unfilled: list[DecisionRecord],
+    ) -> tuple[Position, Money, Money]:
+        """Execute a pending order against this bar and book whatever resulted."""
+        fill, outcome = self._execute(order, bar, previous_close, now, session)
+
+        if fill is None:
+            # A DAY order that could not execute expires; it is not carried
+            # forward, because the market has moved on.
+            record = DecisionRecord(
+                now, "NO_FILL", outcome.reason, {"client_order_id": order.client_order_id}
+            )
+            decisions.append(record)
+            unfilled.append(record)
+            return position, cash, total_costs
+
+        position, cash, total_costs = self._apply_fill(
+            fill, position, cash, total_costs, fills=fills, decisions=decisions, now=now
+        )
+        if outcome.partial:
+            record = DecisionRecord(
+                now, "PARTIAL_FILL", outcome.reason, {"filled": str(outcome.filled_quantity)}
+            )
+            decisions.append(record)
+            unfilled.append(record)
+        return position, cash, total_costs
+
     def _execute(
-        self, order: Order, price: Decimal, now: dt.datetime, session: SessionCostState
-    ) -> Fill:
-        """Fill at the next bar's open. No slippage model yet — Phase 5."""
+        self,
+        order: Order,
+        bar: Any,
+        previous_close: Decimal | None,
+        now: dt.datetime,
+        session: SessionCostState,
+    ) -> tuple[Fill | None, FillOutcome]:
+        """Fill against the bar via the fill model.
+
+        Returns ``(fill, outcome)``. The fill is ``None`` when nothing executed —
+        a bar with no volume, or a limit price the bar never touched. Those are
+        real outcomes, not edge cases, and a backtest that quietly fills them
+        anyway is inventing liquidity.
+        """
         request = order.request
+        outcome = self.fill_model.fill(
+            FillRequest(
+                order=order,
+                open_price=Decimal(str(bar["open"])),
+                high_price=Decimal(str(bar["high"])),
+                low_price=Decimal(str(bar["low"])),
+                close_price=Decimal(str(bar["close"])),
+                volume=Decimal(str(bar["volume"])),
+                previous_close=previous_close,
+            )
+        )
+        if not outcome.filled:
+            return None, outcome
+
         costs = self.cost_model.compute(
             CostContext(
                 instrument=request.instrument,
                 side=request.side,
-                quantity=request.quantity,
-                price=price,
+                quantity=outcome.filled_quantity,
+                price=outcome.fill_price,
                 timestamp=now,
                 session=session,
             )
         )
-        order.with_state(OrderState.FILLED, filled_quantity=request.quantity)
-        return Fill.create(
+        fill = Fill.create(
             client_order_id=order.client_order_id,
             instrument=request.instrument,
             side=request.side,
-            quantity=request.quantity,
-            price=price,
+            quantity=outcome.filled_quantity,
+            price=outcome.fill_price,
             costs=costs,
             timestamp=now,
             strategy_id=request.strategy_id,
         )
+        return fill, outcome
 
     def _manifest(self, start: dt.date, end: dt.date, bars: int) -> dict[str, str]:
         """Provenance. Without it a backtest is an anecdote (Phase 0 §16.3)."""
@@ -549,8 +674,9 @@ class WalkingSkeletonRunner:
             "bars": str(bars),
             "starting_capital": str(self.starting_capital.amount),
             "fill_convention": "signal at bar N close, fill at bar N+1 open",
+            **self.fill_model.describe(),
             "features_precomputed": (
                 ",".join(self._feature_engine.names) if self._feature_engine else "none"
             ),
-            "engine": "walking_skeleton_phase1",
+            "engine": "event_driven_phase5",
         }

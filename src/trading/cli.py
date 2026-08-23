@@ -9,9 +9,19 @@ from typing import Annotated, Any
 
 import pandas as pd
 import typer
+from rich import box
 from rich.console import Console
 from rich.table import Table
 
+from trading.backtest.canary import run_leakage_canary
+from trading.backtest.fills import (
+    FixedBpsSlippage,
+    NoSlippage,
+    RealisticFillModel,
+    SpreadSlippage,
+    SquareRootImpact,
+)
+from trading.backtest.reports import build_report
 from trading.calendars.base import calendar_for
 from trading.config.compliance import profile_for
 from trading.config.settings import Settings
@@ -371,6 +381,64 @@ def lifecycle(
 
 
 @app.command()
+def canary(
+    symbol: str = "RELIANCE",
+    strategy: str = "sma_cross",
+    source: str = "fixture",
+    start: str = "2015-01-01",
+    end: str = "2026-08-21",
+    trials: int = 10,
+) -> None:
+    """Run the leakage canary: does the strategy profit on structureless data?"""
+    settings = Settings()
+    configure_logging("WARNING", settings.log_format)
+
+    instrument = _instrument(symbol)
+    provider = _provider(source)
+    start_date, end_date = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    bars = provider.get_bars(instrument.id, start_date, end_date)
+    if bars.empty:
+        console.print("[red]No bars available.[/red]")
+        raise typer.Exit(1)
+
+    compliance = profile_for(instrument.market)
+
+    def run_on(frame: pd.DataFrame) -> float:
+        class Fixed:
+            info = provider.info
+
+            def get_bars(self, *args: object, **kwargs: object) -> pd.DataFrame:
+                return frame
+
+        outcome = WalkingSkeletonRunner(
+            provider=Fixed(),
+            instrument=instrument,
+            strategy=(
+                default_registry().build(strategy)
+                if strategy not in _STRATEGIES
+                else SmaCross(instrument.id, 50, 200, Decimal("0.20"))
+            ),
+            cost_model=IndiaDeliveryEquityCosts(),
+            risk_engine=RiskEngine(RiskLimits(), compliance, kill_switch_path=Path("KILL")),
+            compliance=compliance,
+            starting_capital=Money(Decimal("400000"), instrument.currency),
+            mode=TradingMode.BACKTEST,
+        ).run(start_date, end_date)
+        return float(outcome.metrics.get("net_return", 0))
+
+    console.print(f"Shuffling {len(bars)} bars {trials} times — this takes a moment…")
+    result = run_leakage_canary(run_on, bars, trials=trials)
+
+    colour = "red" if result.leaking else ("yellow" if result.implausible_magnitude else "green")
+    console.print(f"\n[{colour}]{result.summary()}[/{colour}]")
+    console.print(
+        "\n[dim]This proves a class of leak is absent, not that the strategy is correct. "
+        "A leak whose edge depends on real autocorrelation can evade it — see "
+        "docs/backtesting-guide.md.[/dim]"
+    )
+
+
+@app.command()
 def risk_rules(profile: str = "") -> None:
     """Every pre-trade rule, in evaluation order, with what each one is for."""
     limits = load_risk_profile(profile) if profile else RiskLimits()
@@ -456,6 +524,10 @@ def backtest(
     show_decisions: int = 10,
     adjustment: str = "SPLIT_ONLY",
     risk_profile_path: str = "",
+    slippage: str = "spread",
+    max_participation: float = 0.05,
+    trials: int = 1,
+    full_report: bool = False,
 ) -> None:
     """Run the walking skeleton end to end.
 
@@ -497,9 +569,82 @@ def backtest(
         compliance=compliance,
         starting_capital=Money(Decimal(str(capital)), instrument.currency),
         mode=TradingMode.BACKTEST,
+        fill_model=RealisticFillModel(
+            slippage_model=_slippage(slippage),
+            max_participation=Decimal(str(max_participation)),
+        ),
+        trials=trials,
     ).run(dt.date.fromisoformat(start), dt.date.fromisoformat(end))
 
     _render(result, strat.spec.name, show_decisions)
+    if full_report:
+        _render_full(result)
+
+
+_SLIPPAGE_MODELS = {
+    "none": NoSlippage,
+    "fixed": FixedBpsSlippage,
+    "spread": SpreadSlippage,
+    "impact": SquareRootImpact,
+}
+
+
+def _slippage(name: str) -> Any:
+    try:
+        return _SLIPPAGE_MODELS[name]()
+    except KeyError as exc:
+        raise typer.BadParameter(
+            f"Unknown slippage model {name!r}. Choose from {sorted(_SLIPPAGE_MODELS)}."
+        ) from exc
+
+
+def _render_full(result: RunResult) -> None:
+    """The full metric set, plus the flags worth looking at before believing it."""
+    report = build_report(result.metrics, result.equity_curve, result.trades, result.manifest)
+
+    table = Table(title="Performance", title_justify="left")
+    table.add_column("Section", style="dim")
+    table.add_column("Metric", style="bold cyan")
+    table.add_column("Value", justify="right")
+    last_section = ""
+    for section, label, value in report.summary_lines():
+        table.add_row(section if section != last_section else "", label, value)
+        last_section = section
+    console.print()
+    console.print(table)
+
+    if not report.monthly_returns.empty:
+        monthly = Table(
+            title="Monthly returns (%)", title_justify="left", padding=(0, 1), box=box.SIMPLE
+        )
+        monthly.add_column("Yr", style="bold cyan")
+        for month in range(1, 13):
+            monthly.add_column(f"{month:02d}", justify="right")
+        for year, row in report.monthly_returns.iterrows():
+            cells = []
+            for month in range(1, 13):
+                value = row.get(month)
+                if value is None or pd.isna(value):
+                    cells.append("·")
+                else:
+                    colour = "green" if value >= 0 else "red"
+                    cells.append(f"[{colour}]{value * 100:+.1f}[/{colour}]")
+            monthly.add_row(str(year), *cells)
+        console.print()
+        console.print(monthly)
+
+    flags = report.verdict()
+    console.print()
+    if flags:
+        console.print("[bold yellow]Worth looking at before believing this[/bold yellow]")
+        for flag in flags:
+            console.print(f"  [yellow]•[/yellow] {flag}")
+    else:
+        console.print("[green]No automated flags raised.[/green]")
+    console.print(
+        "\n[dim]Flags are prompts to look harder, not conclusions. Every one has an "
+        "innocent explanation; several together rarely do.[/dim]"
+    )
 
 
 def _render(result: RunResult, strategy_name: str, show_decisions: int) -> None:
@@ -514,6 +659,14 @@ def _render(result: RunResult, strategy_name: str, show_decisions: int) -> None:
     summary.add_row("Total costs", str(result.total_costs.settled()))
     summary.add_row("Cost drag", f"{result.cost_drag:.2%}")
     summary.add_row("Fills", str(len(result.fills)))
+    summary.add_row("Sharpe", f"{result.metrics.get('sharpe', 0):.2f}")
+    summary.add_row("Max drawdown", f"{result.metrics.get('max_drawdown', 0):.2%}")
+    summary.add_row(
+        "Deflated Sharpe",
+        f"{result.metrics.get('deflated_sharpe', 0):.3f} "
+        f"({result.metrics.get('trials', 1)} trial(s) claimed)",
+    )
+    summary.add_row("Unfilled / partial", str(len(result.unfilled)))
     summary.add_row("Risk rejections", str(len(result.rejections)))
     summary.add_row(
         "Halt", result.halt_summary if not result.halted else f"[red]{result.halt_summary}[/red]"

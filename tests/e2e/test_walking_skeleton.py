@@ -96,11 +96,32 @@ def test_manifest_records_everything_needed_to_explain_a_changed_result(instrume
 
 
 def test_fills_happen_at_the_next_bars_open_never_the_signal_bars_close(instrument):
-    """Same-bar fills are the largest single source of fake alpha."""
+    """Same-bar fills are the largest single source of fake alpha.
+
+    The fill price is the next bar's open plus slippage — close to the open, and
+    demonstrably not the signal bar's close.
+    """
     result = build(instrument, BuyAndHold(instrument.id, Decimal("0.20"))).run(START, END)
     bars = FixtureProvider().get_bars(instrument.id, START, END)
     fill = result.fills[0]
-    assert float(fill.price) == pytest.approx(float(bars.loc[fill.timestamp, "open"]))
+
+    bar_open = float(bars.loc[fill.timestamp, "open"])
+    assert float(fill.price) == pytest.approx(bar_open, rel=0.01)
+
+    signal_bar = bars.index[bars.index.get_loc(fill.timestamp) - 1]
+    assert float(fill.price) != pytest.approx(float(bars.loc[signal_bar, "close"]))
+
+
+def test_a_buy_fills_above_the_open_and_a_sell_below_it(instrument):
+    """Slippage always works against you — that is what makes it slippage."""
+    result = build(instrument, SmaCross(instrument.id, 50, 200, Decimal("0.20"))).run(START, END)
+    bars = FixtureProvider().get_bars(instrument.id, START, END)
+    for fill in result.fills:
+        bar_open = Decimal(str(bars.loc[fill.timestamp, "open"]))
+        if str(fill.side) == "BUY":
+            assert fill.price >= bar_open
+        else:
+            assert fill.price <= bar_open
 
 
 def test_kill_switch_file_blocks_every_order(instrument, tmp_path):

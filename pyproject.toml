@@ -33,6 +33,7 @@ dev = [
     "hypothesis>=6.112",
     "ruff>=0.6",
     "mypy>=1.11",
+    "backtrader>=1.9.78.123",
 ]
 
 [build-system]
@@ -93,4 +94,10 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
     "integration: requires a live Postgres (skipped unless TRADING_DATABASE_URL is set)",
+]
+# A numeric warning here is usually a silent NaN heading for a risk number or a
+# performance metric, so warnings are failures rather than noise.
+filterwarnings = [
+    "error::RuntimeWarning",
+    "error::FutureWarning",
 ]

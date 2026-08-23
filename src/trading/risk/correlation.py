@@ -86,6 +86,12 @@ def correlation_adjusted_exposure(
 
     assert returns is not None
     aligned = returns[symbols].dropna()
+
+    # A series with no variance has no correlation to anything — computing it
+    # anyway divides by zero and yields a silent NaN. Treat those instruments as
+    # fully correlated, which is the same conservative reading as no history.
+    if bool((aligned.std(ddof=0) == 0).any()):
+        return ExposureBreakdown(nominal, nominal, len(aligned), assumed_correlated=True)
     matrix = aligned.corr().to_numpy(dtype=float)
     matrix = np.nan_to_num(matrix, nan=1.0)  # an unestimable pair is treated as correlated
 

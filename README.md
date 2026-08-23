@@ -7,9 +7,9 @@ algorithmic trading strategies — built so that **AI never directly controls mo
 
 | | |
 |---|---|
-| **Current phase** | Phase 4 — Risk engine *(complete)* |
+| **Current phase** | Phase 5 — Backtesting engine *(complete)* |
 | **Market** | India-first (NSE/BSE), US adapter at Phase 9 |
-| **Tests** | 301 passing · ruff, ruff-format and mypy clean |
+| **Tests** | 352 passing · ruff, ruff-format and mypy clean |
 | **Trading mode** | `RESEARCH` — `LIVE` is refused at startup and stays refused until Phase 12 |
 
 ## Start here
@@ -26,8 +26,10 @@ algorithmic trading strategies — built so that **AI never directly controls mo
    expression language, and lifecycle statuses you have to earn.
 6. **[Risk Management](docs/risk-guide.md)** — the rule set, correlation-adjusted exposure,
    halt levels, and compliance enforced rather than documented.
-7. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
-8. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
+7. **[Backtesting](docs/backtesting-guide.md)** — fill models, the deflated Sharpe ratio,
+   the leakage canary, and the backtrader cross-check.
+8. **[Local setup on macOS](docs/setup-local-mac.md)** — from nothing to a green test run in ~5 minutes.
+9. **[Glossary](docs/glossary.md)** — every trading term used in this project, in plain language.
 
 ## Quick start
 
@@ -69,6 +71,12 @@ exposure so correlated positions consume the budget they actually use, a halt st
 clears itself, and SEBI/PDT compliance enforced as risk rules. Fails closed throughout — a rule
 that raises is a rejection, never a skip. See [docs/risk-guide.md](docs/risk-guide.md).
 
+And the Phase 5 backtesting engine: slippage and market-impact models, a volume-participation
+cap that forces partial fills, the full metric set including the Deflated Sharpe Ratio, a
+leakage canary with a documented detection envelope, and a backtrader cross-check that agrees
+with our engine to 0.046% of starting capital. See
+[docs/backtesting-guide.md](docs/backtesting-guide.md).
+
 **Not built yet:** the real backtesting engine (slippage, spread, partial fills, volume caps),
 validation and walk-forward testing, paper trading, broker connections, and the dashboard.
 **You cannot place a trade with this, by design.**
@@ -88,6 +96,8 @@ uv run trading lifecycle --to-status PROMISING   # what blocks a promotion
 uv run trading risk-rules                        # every pre-trade rule and monitor
 uv run trading risk-profile <path.yaml>          # limits, and what each protects against
 uv run trading halt-drill                        # exercise the kill switch
+uv run trading backtest --full-report --trials 50  # every metric, with flags
+uv run trading canary                            # does it profit on structureless data?
 ```
 
 ## The one-paragraph version
