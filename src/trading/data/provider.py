@@ -64,7 +64,16 @@ class ProviderInfo:
 
 
 class HistoricalDataProvider(Protocol):
-    info: ProviderInfo
+    @property
+    def info(self) -> ProviderInfo:
+        """Declared read-only so a frozen dataclass can implement the protocol.
+
+        A mutable attribute satisfies this too, so nothing that already declares
+        ``info: ProviderInfo`` has to change — but a provider built as a frozen
+        dataclass could not satisfy a settable member, and providers that hold no
+        state are exactly the ones that should be frozen.
+        """
+        ...
 
     def get_bars(
         self,

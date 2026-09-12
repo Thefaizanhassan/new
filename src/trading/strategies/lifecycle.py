@@ -10,19 +10,29 @@ Three principles, and the third is the one that keeps this honest.
    prototype-tier data cannot be promoted past research, however good the
    numbers look.  Phase 2 made the tier travel with the bars precisely so this
    gate could read it.
-3. **A check that does not exist yet blocks, rather than passes.**  Walk-forward
-   validation arrives in Phase 6; until then the criterion reports
-   ``UNAVAILABLE`` and refuses promotion.  A gate that silently passes because
-   nobody implemented it is worse than no gate — it manufactures confidence.
+3. **A check that does not exist yet blocks, rather than passes.**  A gate that
+   silently passes because nobody implemented it is worse than no gate — it
+   manufactures confidence.
+
+Phase 6 built the checks behind ``VALIDATED``, so ``GATE_010`` to ``GATE_015``
+are now answerable.  They are answered by :class:`trading.validation.report.
+ValidationReport`, which derives each field from an artefact that ran rather than
+from an assertion.  ``Evidence`` still accepts hand-written values, because a
+human sign-off and a paper-trading day count have no artefact — but nothing in
+the validation block can be filled in by opinion.
+
+The remaining ``UNAVAILABLE`` gates are honest: reconciliation (Phase 7) and live
+trading (Phase 12) are not built, so they block.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from trading.data.provider import DataTier
 from trading.strategies.base import LifecycleStatus
@@ -33,6 +43,7 @@ __all__ = [
     "GateResult",
     "PromotionDecision",
     "evaluate_promotion",
+    "evidence_from_validation",
 ]
 
 
@@ -80,6 +91,9 @@ class Evidence:
     parameter_plateau: bool | None = None
     monte_carlo_drawdown_ok: bool | None = None
     trial_count: int | None = None
+    deflated_sharpe: float | None = None
+    """Probability the out-of-sample Sharpe reflects skill rather than selection,
+    given ``trial_count``. The point of counting trials at all."""
     risk_limits_defined: bool = False
     kill_switch_drilled: bool = False
     reconciliation_clean: bool | None = None
@@ -87,6 +101,35 @@ class Evidence:
     divergence_within_tolerance: bool | None = None
     human_signoff_at: datetime | None = None
     human_signoff_by: str = ""
+
+
+def evidence_from_validation(
+    report: Any,
+    *,
+    base: Evidence | None = None,
+) -> Evidence:
+    """Fill the validation block of an :class:`Evidence` from a validation report.
+
+    ``report`` is a :class:`trading.validation.report.ValidationReport`; it is
+    typed loosely here so the lifecycle module — which the whole strategy layer
+    imports — does not depend on the validation package, which imports the engine.
+
+    Fields the report cannot answer stay as they were, which for a fresh
+    ``Evidence`` means ``None``, which blocks.  A report is not allowed to make a
+    criterion it did not measure look assessed.
+    """
+    fields = report.evidence_fields()
+    current = base or Evidence(data_tier=fields["data_tier"])
+    return replace(
+        current,
+        data_tier=fields["data_tier"],
+        out_of_sample_passed=fields["out_of_sample_passed"],
+        walk_forward_passed=fields["walk_forward_passed"],
+        parameter_plateau=fields["parameter_plateau"],
+        monte_carlo_drawdown_ok=fields["monte_carlo_drawdown_ok"],
+        trial_count=fields["trial_count"],
+        deflated_sharpe=fields["deflated_sharpe"],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +253,35 @@ def _validated_criteria(evidence: Evidence, tier: GateResult) -> list[GateResult
             "recorded",
             "without the number of trials, the deflated Sharpe cannot be computed",
         ),
+        _deflated_sharpe_criterion(evidence),
     ]
+
+
+_MIN_DEFLATED_SHARPE = 0.95
+"""Below this the observed Sharpe is not distinguishable from the best of however
+many variants were tried (López de Prado). The threshold lives here, next to the
+gate that enforces it, rather than being passed in — a promotion bar that the
+caller can lower is not a bar."""
+
+
+def _deflated_sharpe_criterion(evidence: Evidence) -> GateResult:
+    """The one metric that reads a result against how hard it was looked for."""
+    dsr = evidence.deflated_sharpe
+    if dsr is None:
+        return GateResult(
+            "GATE_015_deflated_sharpe",
+            CriterionStatus.UNAVAILABLE,
+            "not computed",
+            f">= {_MIN_DEFLATED_SHARPE:.2f}",
+            "run walk-forward with a recorded trial count to compute it",
+        )
+    return GateResult(
+        "GATE_015_deflated_sharpe",
+        CriterionStatus.PASS if dsr >= _MIN_DEFLATED_SHARPE else CriterionStatus.FAIL,
+        f"{dsr:.3f}",
+        f">= {_MIN_DEFLATED_SHARPE:.2f}",
+        "a raw Sharpe says nothing without the number of attempts behind it",
+    )
 
 
 def _paper_criteria(evidence: Evidence, tier: GateResult) -> list[GateResult]:

@@ -9,17 +9,28 @@ auditable in a way that generated Python is not.
 Rules are written in the restricted expression language
 (:mod:`trading.strategies.expressions`), so a config file cannot execute
 arbitrary code.
+
+**Parameters and why substitution is safe here.**  A ``parameters:`` block
+declares named numbers that ``{placeholders}`` in the rule text resolve against,
+so a sweep can vary ``{fast}`` from 10 to 100 without twenty near-identical YAML
+files.  Substituting text into a rule is exactly the shape of an injection bug,
+so two things constrain it: parameter **values must be numeric**, which means a
+substituted value cannot contain an operator, a call or a parenthesis; and the
+rendered rule still goes through the expression allowlist, which is the same gate
+a hand-written rule passes.  Either alone would be enough; both is deliberate.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from trading.core.instrument import Instrument, InstrumentId
 from trading.core.intent import Flat, Intent, TargetWeight
@@ -28,7 +39,59 @@ from trading.features.engine import FeatureSpec
 from trading.strategies.base import LifecycleStatus, StrategyContext, StrategySpec
 from trading.strategies.expressions import ExpressionError, compile_expression
 
-__all__ = ["ConfigStrategy", "StrategyConfig", "load_strategy"]
+__all__ = [
+    "ConfigStrategy",
+    "ParameterError",
+    "StrategyConfig",
+    "load_strategy",
+    "render_rule",
+]
+
+
+_PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+_PARAM_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+ParameterValue = int | float | Decimal
+"""Numeric only. See the module docstring: this is what makes substitution safe."""
+
+
+class ParameterError(ValueError):
+    """A parameter block or override that cannot be applied."""
+
+
+def _render_number(value: ParameterValue) -> str:
+    """Render a parameter for substitution into a rule.
+
+    Integral values render without a decimal point so ``sma(close, {fast})``
+    becomes ``sma(close, 50)`` rather than ``sma(close, 50.0)`` — TA-Lib periods
+    are integers, and the expression layer would reject a float there.
+    """
+    as_decimal = Decimal(str(value))
+    if as_decimal == as_decimal.to_integral_value():
+        return str(int(as_decimal))
+    return format(as_decimal.normalize(), "f")
+
+
+def render_rule(template: str, parameters: Mapping[str, ParameterValue]) -> str:
+    """Substitute ``{name}`` placeholders in a rule template.
+
+    Every placeholder must have a value and every value must be used: an
+    unresolved placeholder would reach the expression compiler as a syntax error,
+    and an unused parameter is almost always a typo in one of the two names — a
+    sweep over ``{fast}`` that silently varies nothing is worse than a crash,
+    because it produces a flat surface that reads as a perfect plateau.
+    """
+    referenced = set(_PLACEHOLDER.findall(template))
+    missing = referenced - set(parameters)
+    if missing:
+        raise ParameterError(
+            f"rule {template!r} references undeclared parameter(s) "
+            f"{sorted(missing)}; declared: {sorted(parameters) or 'none'}"
+        )
+    rendered = template
+    for name in referenced:
+        rendered = rendered.replace("{" + name + "}", _render_number(parameters[name]))
+    return rendered
 
 
 class RuleConfig(BaseModel):
@@ -61,9 +124,80 @@ class StrategyConfig(BaseModel):
     universe: list[str] = Field(min_length=1)
     timeframe: Timeframe = Timeframe.DAY_1
     warmup_bars: int = Field(default=200, ge=1)
+    parameters: dict[str, Decimal] = Field(default_factory=dict)
+    """Named numbers that ``{placeholders}`` in the rules resolve against."""
     entry: EntryConfig
     exit: RuleConfig
     lifecycle_status: LifecycleStatus = LifecycleStatus.RESEARCH
+
+    templates: dict[str, str] = Field(default_factory=dict)
+    """The pre-substitution rule text, kept for the manifest. Populated by the
+    renderer, not written by hand — a config that sets it is rejected."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _render_parameters(cls, data: Any) -> Any:
+        """Substitute parameters into the rules *before* anything else validates.
+
+        Order matters: ``RuleConfig`` compiles its rule on assignment, and a rule
+        still containing ``{fast}`` is a syntax error. Rendering here means the
+        compiled rule, the feature spec, the manifest and the content hash all
+        refer to the concrete expression that ran — there is no second, templated
+        form floating around that somebody could mistake for what was tested.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("templates"):
+            raise ParameterError(
+                "'templates' is populated by the loader from the rule text; "
+                "remove it from the config"
+            )
+        raw = data.get("parameters") or {}
+        if not isinstance(raw, dict):
+            raise ParameterError(f"'parameters' must be a mapping, got {type(raw).__name__}")
+
+        parameters: dict[str, Decimal] = {}
+        for name, value in raw.items():
+            if not _PARAM_NAME.match(str(name)):
+                raise ParameterError(
+                    f"parameter name {name!r} must be lowercase letters, digits and "
+                    "underscores, starting with a letter or underscore"
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+                raise ParameterError(
+                    f"parameter {name!r} must be a number, got {type(value).__name__} — "
+                    "non-numeric values would let a parameter rewrite the rule's shape"
+                )
+            try:
+                parameters[str(name)] = Decimal(str(value))
+            except ArithmeticError as exc:
+                raise ParameterError(f"parameter {name!r} is not a number: {value!r}") from exc
+
+        templates: dict[str, str] = {}
+        for section, key in (("entry", "when"), ("exit", "when")):
+            block = data.get(section)
+            if not (isinstance(block, dict) and isinstance(block.get(key), str)):
+                continue
+            template = block[key]
+            rendered = render_rule(template, parameters)
+            if rendered != template:
+                # Only a rule that actually held a placeholder gets a template
+                # recorded. Storing one for every rule would put a duplicate of
+                # each rule in the manifest and make ``templates`` mean nothing.
+                templates[section] = template
+                block[key] = rendered
+
+        unused = set(parameters) - {n for t in templates.values() for n in _PLACEHOLDER.findall(t)}
+        if unused:
+            raise ParameterError(
+                f"parameter(s) {sorted(unused)} are declared but never referenced by "
+                "a rule; a sweep over an unused parameter varies nothing and its flat "
+                "surface reads as a perfect plateau"
+            )
+
+        data["parameters"] = parameters
+        data["templates"] = templates
+        return data
 
     @field_validator("universe")
     @classmethod
@@ -98,6 +232,10 @@ class ConfigStrategy:
                 "exit": config.exit.when,
                 "target_weight": config.entry.target_weight,
                 "warmup_bars": config.warmup_bars,
+                # Both forms travel with the spec: the templates say what was
+                # swept, the values say which point of the sweep actually ran.
+                **{f"param_{k}": v for k, v in sorted(config.parameters.items())},
+                **{f"template_{k}": v for k, v in sorted(config.templates.items())},
             },
             lifecycle_status=config.lifecycle_status,
             author=config.author,
@@ -177,8 +315,27 @@ class ConfigStrategy:
         )
 
 
-def load_strategy(path: Path | str) -> ConfigStrategy:
-    """Load and validate a YAML strategy. Raises before anything can trade."""
+_OVERRIDABLE_FIELDS = frozenset({"warmup_bars", "target_weight"})
+"""Scalars a sweep may set directly, distinct from ``parameters``.
+
+``warmup_bars`` is here for a reason worth knowing: sweeping ``slow`` up to 300
+while ``warmup_bars`` stays at 201 leaves the strategy evaluating an average that
+is still NaN, which produces no trades and an apparently flat, apparently robust
+surface. A sweep over indicator periods must move the warmup with them.
+"""
+
+
+def load_strategy(
+    path: Path | str,
+    overrides: Mapping[str, ParameterValue] | None = None,
+) -> ConfigStrategy:
+    """Load and validate a YAML strategy. Raises before anything can trade.
+
+    ``overrides`` sets declared ``parameters`` and the scalars in
+    ``_OVERRIDABLE_FIELDS``; anything else is rejected rather than ignored, so a
+    sweep over a misspelled name fails instead of silently running the defaults
+    twenty times and reporting a perfect plateau.
+    """
     path = Path(path)
     try:
         raw = yaml.safe_load(path.read_text())
@@ -186,4 +343,22 @@ def load_strategy(path: Path | str) -> ConfigStrategy:
         raise ValueError(f"{path} is not valid YAML: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must contain a YAML mapping, got {type(raw).__name__}")
+
+    if overrides:
+        declared = set(raw.get("parameters") or {})
+        unknown = set(overrides) - declared - _OVERRIDABLE_FIELDS
+        if unknown:
+            raise ParameterError(
+                f"{path}: cannot override {sorted(unknown)} — declared parameters are "
+                f"{sorted(declared) or 'none'} and settable fields are "
+                f"{sorted(_OVERRIDABLE_FIELDS)}"
+            )
+        for name, value in overrides.items():
+            if name == "warmup_bars":
+                raw["warmup_bars"] = int(value)
+            elif name == "target_weight":
+                raw.setdefault("entry", {})["target_weight"] = Decimal(str(value))
+            else:
+                raw.setdefault("parameters", {})[name] = value
+
     return ConfigStrategy(StrategyConfig(**raw))

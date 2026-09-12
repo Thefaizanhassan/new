@@ -15,6 +15,7 @@ from trading.strategies.lifecycle import (
     CriterionStatus,
     Evidence,
     evaluate_promotion,
+    evidence_from_validation,
 )
 
 
@@ -31,6 +32,7 @@ def strong_evidence(**overrides) -> Evidence:
         "parameter_plateau": True,
         "monte_carlo_drawdown_ok": True,
         "trial_count": 12,
+        "deflated_sharpe": 0.97,
         "risk_limits_defined": True,
         "kill_switch_drilled": True,
         "reconciliation_clean": True,
@@ -153,3 +155,88 @@ def test_the_decision_names_every_criterion_it_checked():
     assert "VALIDATED" in decision.summary()
     for result in decision.results:
         assert result.observed and result.required
+
+
+# ── Phase 6: the validation gates are now answerable ────────────────────────
+def test_missing_deflated_sharpe_blocks_validation():
+    """A Sharpe with no trial count behind it is not evidence.
+
+    The whole experiment ledger exists to make this number computable. If it is
+    absent the gate must block, not wave the strategy through on the raw ratio.
+    """
+    decision = evaluate_promotion(
+        "s", L.PROMISING, L.VALIDATED, strong_evidence(deflated_sharpe=None)
+    )
+    assert not decision.approved
+    gate = next(r for r in decision.results if r.criterion_id == "GATE_015_deflated_sharpe")
+    assert gate.status is CriterionStatus.UNAVAILABLE
+
+
+def test_deflated_sharpe_below_threshold_fails_rather_than_blocks():
+    """Measured-and-bad is a FAIL; not-measured is UNAVAILABLE. The distinction matters.
+
+    UNAVAILABLE says "go and run the check". FAIL says "you ran it and the answer
+    was no". Collapsing them would hide which of those happened.
+    """
+    decision = evaluate_promotion(
+        "s", L.PROMISING, L.VALIDATED, strong_evidence(deflated_sharpe=0.42)
+    )
+    gate = next(r for r in decision.results if r.criterion_id == "GATE_015_deflated_sharpe")
+    assert gate.status is CriterionStatus.FAIL
+    assert "0.420" in gate.observed
+
+
+def test_evidence_from_validation_cannot_invent_a_pass():
+    """A report missing an artefact must yield None, which blocks.
+
+    This is the load-bearing property of the Phase 6 wiring: there is no path
+    from "no sweep was run" to "the parameters are on a plateau".
+    """
+
+    class BareReport:
+        def evidence_fields(self):
+            return {
+                "data_tier": DataTier.PRODUCTION,
+                "out_of_sample_passed": None,
+                "walk_forward_passed": False,
+                "parameter_plateau": None,
+                "monte_carlo_drawdown_ok": None,
+                "trial_count": None,
+                "deflated_sharpe": None,
+            }
+
+    evidence = evidence_from_validation(BareReport())
+    decision = evaluate_promotion("s", L.PROMISING, L.VALIDATED, evidence)
+    assert not decision.approved
+    unavailable = {
+        r.criterion_id for r in decision.results if r.status is CriterionStatus.UNAVAILABLE
+    }
+    assert unavailable == {
+        "GATE_010_out_of_sample",
+        "GATE_012_parameter_plateau",
+        "GATE_013_monte_carlo_drawdown",
+        "GATE_014_trial_count_recorded",
+        "GATE_015_deflated_sharpe",
+    }
+
+
+def test_evidence_from_validation_preserves_fields_it_cannot_answer():
+    """Paper-trading days and a human sign-off have no artefact; a report must not clear them."""
+
+    class Report:
+        def evidence_fields(self):
+            return {
+                "data_tier": DataTier.PRODUCTION,
+                "out_of_sample_passed": True,
+                "walk_forward_passed": True,
+                "parameter_plateau": True,
+                "monte_carlo_drawdown_ok": True,
+                "trial_count": 40,
+                "deflated_sharpe": 0.98,
+            }
+
+    merged = evidence_from_validation(Report(), base=strong_evidence())
+    assert merged.paper_trading_days == 90
+    assert merged.human_signoff_by == "rajeshwar"
+    assert merged.trial_count == 40
+    assert evaluate_promotion("s", L.PROMISING, L.VALIDATED, merged).approved

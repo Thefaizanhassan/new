@@ -13,7 +13,10 @@ credentials.json
 *.parquet
 *.duckdb
 *.db
+*.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 
 # Python
 __pycache__/

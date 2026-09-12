@@ -183,10 +183,7 @@ input.
 
 ## What is still missing
 
-- **Walk-forward and out-of-sample validation** — Phase 6. Until then no strategy can pass the
-  `VALIDATED` lifecycle gate, which is the correct answer rather than a limitation.
-- **Parameter sensitivity surfaces** — the plateau-versus-spike test, the single best
-  overfitting detector.
-- **Monte Carlo trade resampling**, for a distribution of drawdowns rather than the one path
-  history happened to take.
+- **Walk-forward validation, parameter sensitivity surfaces and Monte Carlo resampling** were
+  built in Phase 6 — see [docs/validation-guide.md](validation-guide.md). Everything below this
+  point is still outstanding.
 - **Bid/ask data.** Spread is currently an assumption in basis points, not a measurement.

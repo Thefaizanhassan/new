@@ -187,13 +187,19 @@ yfinance is prototype-tier — which is the correct answer, not a bug.
 **An unimplemented check blocks rather than passes.**
 
 ```
-[UNAVAILABLE] GATE_011_walk_forward: not assessed (required: True)
+[UNAVAILABLE] GATE_022_reconciliation_clean: not assessed (required: True)
               — the check that would answer this is not implemented yet
 ```
 
-Walk-forward validation arrives in Phase 6. Until then the criterion reports `UNAVAILABLE` and
-refuses promotion. A gate that silently passes because nobody wrote its check doesn't just fail
-to help — it manufactures confidence.
+Reconciliation arrives in Phase 7 and live trading in Phase 12, so their criteria report
+`UNAVAILABLE` and refuse promotion. A gate that silently passes because nobody wrote its check
+doesn't just fail to help — it manufactures confidence.
+
+The `VALIDATED` gates were in this state until Phase 6 built the checks behind them. They now
+resolve from artefacts that ran — walk-forward folds, a parameter surface, a resampled drawdown
+distribution, a counted trial ledger — and `UNAVAILABLE` ("go and run the check") stays distinct
+from `FAIL` ("you ran it and the answer was no"). See
+[docs/validation-guide.md](validation-guide.md).
 
 Pausing and retiring are never gated. Stopping a strategy must not require evidence; that is how
 a bad strategy keeps running.
