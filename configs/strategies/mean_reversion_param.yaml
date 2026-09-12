@@ -1,0 +1,25 @@
+# Parameterised mean reversion. Two axes worth sweeping independently: the
+# lookback the z-score is measured over, and how many standard deviations count
+# as "oversold". They interact — a 5-day z-score reaches -3 far more often than a
+# 60-day one — which is exactly the sort of thing a two-dimensional surface shows
+# and a one-dimensional sweep of either axis hides.
+id: mean_reversion_param
+name: Z-Score Mean Reversion — parameterised
+version: 1.0.0
+description: >
+  Buy when price is `entry_z` standard deviations below its `lookback`-day mean
+  while the long-term trend is still up; exit on reversion to the mean.
+author: reference
+universe: [NSE:RELIANCE]
+timeframe: 1d
+warmup_bars: 201
+parameters:
+  lookback: 20
+  entry_z: -2.0
+  trend: 200
+entry:
+  when: zscore(close, {lookback}) < {entry_z} and close > sma(close, {trend})
+  target_weight: 0.20
+exit:
+  when: zscore(close, {lookback}) > 0.0
+lifecycle_status: RESEARCH

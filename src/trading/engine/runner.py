@@ -15,9 +15,12 @@ Two conventions here are the ones that keep a backtest honest:
 * **Every decision is an event**, including the rejections. A blocked trade is
   as informative as an executed one.
 
-This is not the Phase 5 backtesting engine. There is no slippage model, no
-partial fills, no volume cap and no walk-forward machinery yet. It exists to
-prove the wiring, and it says so in its own output.
+Phase 5 replaced the placeholder execution here with the real fill model —
+slippage, market impact, a volume-participation cap and genuine no-fills — and
+Phase 6 put this loop underneath the validation layer, which calls it once per
+parameter set per window. The name is kept because the *shape* of the loop is
+still the walking skeleton's: one instrument, one pending order at a time.
+Multi-instrument portfolio execution is still ahead.
 """
 
 from __future__ import annotations

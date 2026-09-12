@@ -256,6 +256,28 @@ Recorded here so it isn't a surprise later. **None of it is needed for research 
 | `uv run trading ingest --symbol X` | Backfill bars into the local store |
 | `uv run trading catalog` | What data you hold |
 | `uv run trading backtest --source store` | Run the skeleton against stored, adjusted data |
+| `uv run trading sensitivity` | Sweep parameters — plateau or spike? |
+| `uv run trading walk-forward` | Optimise on each window, test on the next |
+| `uv run trading validate` | The whole validation battery, then the lifecycle gate |
+| `uv run trading experiments` | How many things you have tried, and what that costs you |
+
+### A first validation run
+
+Once you have bars in the store, this is the command worth running before you believe any
+backtest. It takes a minute or two on ten years of daily bars:
+
+```bash
+uv run trading validate --symbol RELIANCE --source store \
+  --axis "fast=20,30,40,50,60" --axis "slow=100,150,200"
+```
+
+It will almost certainly tell you the strategy is not validated, and it will say why in six
+separate ways. That is the tool working. [docs/validation-guide.md](validation-guide.md) explains
+how to read each line.
+
+The ledger it writes to (`data/experiments.sqlite`) accumulates across sessions, so a sweep you
+ran last week still counts against a result you find today. That is deliberate: it is the part a
+human research log always gets wrong.
 
 Poking at it directly:
 
@@ -297,12 +319,14 @@ Phase 1 is the foundation, not a usable trading system. Honestly:
 **Works today:** the domain core (exact money, FIFO-lot position accounting, the risk-approval
 gate that makes orders unforgeable); the pandas data pipeline with the full validation gate; a
 bitemporal Parquet store with corporate actions and resumable backfill; Indian cost models;
-NSE/BSE calendars; SEBI and US compliance profiles; eight documented indicators; two reference
-strategies; a pre-trade risk engine; and an end-to-end runner. 172 tests.
+NSE/BSE calendars; SEBI and US compliance profiles; eight documented indicators; reference
+strategies including parameterised ones; a pre-trade risk engine; a backtesting engine with
+realistic fills and the full metric set; and the validation layer — walk-forward, purged
+cross-validation, parameter surfaces, Monte Carlo drawdown distributions and a counted
+experiment ledger. 480 tests.
 
-**Does not exist yet:** the real backtesting engine (slippage, spread, partial fills, volume
-caps), validation and walk-forward testing, paper trading, any broker connection, and the
-dashboard.
+**Does not exist yet:** paper trading, any broker connection, the dashboard, the India market
+adapter, the AI research layer, and the intraday and options tracks.
 
 **You cannot place a trade with this, on purpose.** `TRADING_MODE=LIVE` is refused at startup
 with an explanatory error, and will stay refused until Phase 12.

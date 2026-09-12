@@ -254,6 +254,33 @@ gets arbitraged away.
 **Multiple testing problem** — Testing many hypotheses guarantees false positives. Fixed by
 counting attempts and applying corrections like DSR.
 
+**Walk-forward efficiency** — Out-of-sample performance divided by in-sample performance. 0.1
+means the tuning found noise; around 0.5 or better means some of the edge survived the
+transition — which is a weaker claim than it sounds.
+
+**Parameter stability** — How often the folds of a walk-forward agree on the best setting. Low
+stability means there is no stable optimum, so whichever value a full-history fit lands on is
+arbitrary. A strategy can post acceptable efficiency and still fail this.
+
+**Plateau ratio** — A peak's neighbourhood score divided by its own score, with the peak itself
+excluded from its neighbourhood. Near 1.0 is a plateau; near 0 is a spike; negative means the
+peak's neighbours lose money.
+
+**Robust best** — The parameter setting with the strongest *neighbourhood*, rather than the
+highest single score. The one to deploy: on a genuine plateau it lands near the middle, and on a
+spiky surface it refuses the spike.
+
+**Block bootstrap** — Resampling *contiguous* stretches of returns rather than individual days,
+so volatility clustering survives. A day-by-day shuffle breaks up the runs of bad days that
+create drawdowns and therefore understates drawdown.
+
+**Trial count** — How many distinct parameter sets were evaluated before a result was reported.
+The denominator of the Deflated Sharpe Ratio. Only meaningful if counted by the machine — a
+self-reported trial count is always 1.
+
+**Ruin** — Not zero equity, but the drawdown at which a real operator stops. Much shallower, and
+the number that actually ends a strategy's life.
+
 ---
 
 ## Strategy types

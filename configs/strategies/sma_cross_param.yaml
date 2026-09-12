@@ -1,0 +1,32 @@
+# A parameterised strategy, for sweeping.
+#
+# The `{fast}` and `{slow}` placeholders resolve against the `parameters:` block
+# below, so `trading sensitivity` can vary them without twenty near-identical
+# files. Parameter values must be numbers — see the note in
+# trading/strategies/config_strategy.py on why that is what makes substitution
+# safe rather than an injection surface.
+#
+# Note `warmup_bars: 201` and `slow: 200`. Those two have to move together: sweep
+# `slow` up to 300 with warmup left at 201 and the strategy spends the first 300
+# bars evaluating an average that is still NaN, trades nothing, and produces a
+# flat surface that reads as a perfect plateau. `trading sensitivity` derives the
+# warmup from the largest period it is sweeping for exactly this reason.
+id: sma_cross_param
+name: SMA Crossover — parameterised
+version: 1.0.0
+description: >
+  The same trend-following rule as sma_cross_reliance, with the two averages
+  exposed as parameters so the plateau-versus-spike test has something to sweep.
+author: reference
+universe: [NSE:RELIANCE]
+timeframe: 1d
+warmup_bars: 201
+parameters:
+  fast: 50
+  slow: 200
+entry:
+  when: crossed_above(sma(close, {fast}), sma(close, {slow}))
+  target_weight: 0.20
+exit:
+  when: crossed_below(sma(close, {fast}), sma(close, {slow}))
+lifecycle_status: RESEARCH

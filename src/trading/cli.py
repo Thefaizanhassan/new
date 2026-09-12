@@ -51,8 +51,30 @@ from trading.strategies import expressions
 from trading.strategies.base import LifecycleStatus
 from trading.strategies.builtin import BuyAndHold, SmaCross
 from trading.strategies.config_strategy import load_strategy
-from trading.strategies.lifecycle import Evidence, evaluate_promotion
+from trading.strategies.lifecycle import (
+    CriterionStatus,
+    Evidence,
+    evaluate_promotion,
+    evidence_from_validation,
+)
 from trading.strategies.registry import default_registry
+from trading.validation.engine_adapter import EngineEvaluator
+from trading.validation.experiments import ExperimentLedger
+from trading.validation.harness import Objective
+from trading.validation.montecarlo import (
+    MonteCarloResult,
+    block_bootstrap_returns,
+    resample_trades,
+)
+from trading.validation.purged_cv import PurgedCvConfig, PurgedCvResult, run_purged_cv
+from trading.validation.report import ValidationReport
+from trading.validation.sensitivity import GridPoint, ParameterGrid, SensitivitySurface
+from trading.validation.splits import Window, window_from
+from trading.validation.walkforward import (
+    WalkForwardConfig,
+    WalkForwardResult,
+    run_walk_forward,
+)
 
 app = typer.Typer(add_completion=False, help="AI algorithmic trading platform")
 console = Console()
@@ -695,3 +717,557 @@ def _render(result: RunResult, strategy_name: str, show_decisions: int) -> None:
 
 if __name__ == "__main__":
     app()
+
+
+# ── validation (Phase 6) ────────────────────────────────────────────────────
+def _evaluator(
+    *,
+    symbol: str,
+    config: str,
+    source: str,
+    capital: float,
+    adjustment: str,
+    slippage: str,
+    objective: str,
+    min_trades: int,
+    ledger_path: str,
+    kind: str,
+) -> tuple[EngineEvaluator, ExperimentLedger]:
+    """Assemble the engine-backed evaluator every validation command shares."""
+    path = Path(config)
+    if not path.exists():
+        raise typer.BadParameter(
+            f"{config} does not exist. Validation sweeps need a parameterised YAML "
+            f"strategy — see configs/strategies/sma_cross_param.yaml."
+        )
+    instrument = _instrument(symbol)
+    ledger = ExperimentLedger(ledger_path)
+    return (
+        EngineEvaluator(
+            provider=_provider(source, adjustment=adjustment),
+            instrument=instrument,
+            build_strategy=lambda p: load_strategy(path, overrides=p),
+            cost_model=IndiaDeliveryEquityCosts(),
+            starting_capital=Money(Decimal(str(capital)), instrument.currency),
+            fill_model=RealisticFillModel(slippage_model=_slippage(slippage)),
+            objective=Objective(metric=objective, min_trades=min_trades),
+            ledger=ledger,
+            ledger_kind=kind,
+        ),
+        ledger,
+    )
+
+
+def _parse_axis(spec: str) -> list[float]:
+    """Parse ``10,20,30`` or ``10:60:10`` (start:stop:step, stop inclusive)."""
+    text = spec.strip()
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 3:
+            raise typer.BadParameter(f"{spec!r} must be start:stop:step or a comma list")
+        start, stop, step = (Decimal(p) for p in parts)
+        if step <= 0:
+            raise typer.BadParameter(f"{spec!r} has a non-positive step")
+        values: list[float] = []
+        current = start
+        while current <= stop:
+            values.append(float(current))
+            current += step
+        return values
+    return [float(Decimal(p)) for p in text.split(",") if p.strip()]
+
+
+def _grid_from(specs: list[str]) -> ParameterGrid:
+    """Build a grid from repeated ``--axis name=values`` options."""
+    axes: dict[str, list[int | float | Decimal]] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise typer.BadParameter(f"{spec!r} must be name=values, e.g. fast=10,20,30")
+        name, values = spec.split("=", 1)
+        parsed = _parse_axis(values)
+        # Integral values become ints so an indicator period is a period, not 20.0.
+        axes[name.strip()] = [int(v) if float(v).is_integer() else v for v in parsed]
+    return ParameterGrid(axes)
+
+
+def _warmup_for(params: dict[str, Any], floor: int) -> int:
+    """Derive warmup from the largest period in the parameter set.
+
+    A sweep that raises an indicator period above the configured warmup leaves the
+    strategy evaluating a NaN average: no trades, and a flat surface that reads as
+    a perfect plateau. Deriving warmup from the parameters removes that trap
+    instead of documenting it.
+    """
+    periods = [int(v) for v in params.values() if isinstance(v, int) and v > 1]
+    return max([floor, *(p + 1 for p in periods)])
+
+
+def _expand(grid: ParameterGrid, warmup_floor: int) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for params in grid.points():
+        point = dict(params)
+        point["warmup_bars"] = _warmup_for(point, warmup_floor)
+        points.append(point)
+    return points
+
+
+def _render_rows(rows: list[tuple[str, str, str]], title: str) -> None:
+    table = Table(title=title, title_justify="left", box=box.SIMPLE)
+    table.add_column("Section", style="dim")
+    table.add_column("Metric", style="bold cyan")
+    table.add_column("Value", justify="right")
+    last = ""
+    for section, label, value in rows:
+        table.add_row(section if section != last else "", label, value)
+        last = section
+    console.print(table)
+
+
+@app.command()
+def walk_forward(
+    symbol: str = "RELIANCE",
+    config: str = "configs/strategies/sma_cross_param.yaml",
+    axis: Annotated[list[str] | None, typer.Option(help="name=values, repeatable")] = None,
+    source: str = "fixture",
+    start: str = "2015-01-01",
+    end: str = "2026-08-21",
+    capital: float = 400_000,
+    train_bars: int = 756,
+    test_bars: int = 252,
+    anchored: bool = False,
+    objective: str = "sharpe",
+    min_trades: int = 2,
+    slippage: str = "spread",
+    adjustment: str = "SPLIT_ONLY",
+    ledger_path: str = "data/experiments.sqlite",
+) -> None:
+    """Optimise on each training window, test on the window that follows it.
+
+    Only the concatenated test segments are quotable; the in-sample column is
+    there to be compared against, not reported.
+    """
+    settings = Settings()
+    configure_logging("WARNING", settings.log_format)
+
+    grid = _grid_from(axis or ["fast=20,50", "slow=100,200"])
+    evaluator, ledger = _evaluator(
+        symbol=symbol,
+        config=config,
+        source=source,
+        capital=capital,
+        adjustment=adjustment,
+        slippage=slippage,
+        objective=objective,
+        min_trades=min_trades,
+        ledger_path=ledger_path,
+        kind="walk_forward",
+    )
+    index = evaluator.load(dt.date.fromisoformat(start), dt.date.fromisoformat(end))
+    points = _expand(grid, warmup_floor=2)
+    console.print(
+        f"{len(index)} bars, {len(points)} parameter sets, "
+        f"train {train_bars} / test {test_bars} — this takes a moment…"
+    )
+
+    result = run_walk_forward(
+        evaluator,
+        index,
+        points,
+        WalkForwardConfig(
+            train_bars=train_bars,
+            test_bars=test_bars,
+            warmup_bars=max(_warmup_for(p, 2) for p in points),
+            anchored=anchored,
+            objective=Objective(metric=objective, min_trades=min_trades),
+        ),
+    )
+
+    console.print()
+    for fold in result.folds:
+        colour = "green" if fold.scored else "yellow"
+        console.print(f"  [{colour}]{fold.label()}[/{colour}]")
+    console.print()
+    _render_rows(
+        [("Walk-forward", label, value) for label, value in result.summary_lines()],
+        f"Walk-forward — {config} on {symbol}",
+    )
+    colour = "green" if result.passed else "red"
+    console.print(f"[{colour}]{result.verdict()}[/{colour}]")
+    console.print(
+        f"[dim]Configuration: {result.config.describe()}\n"
+        f"Ledger now holds {ledger.trial_count(Path(config).stem)} distinct trials "
+        f"for this strategy.[/dim]"
+    )
+
+
+@app.command()
+def sensitivity(
+    symbol: str = "RELIANCE",
+    config: str = "configs/strategies/sma_cross_param.yaml",
+    axis: Annotated[list[str] | None, typer.Option(help="name=values, repeatable")] = None,
+    source: str = "fixture",
+    start: str = "2015-01-01",
+    end: str = "2022-12-31",
+    capital: float = 400_000,
+    objective: str = "sharpe",
+    min_trades: int = 2,
+    slippage: str = "spread",
+    adjustment: str = "SPLIT_ONLY",
+    ledger_path: str = "data/experiments.sqlite",
+) -> None:
+    """Sweep the parameters and report whether the surface is a plateau or a spike.
+
+    Run this on the *training* period. Sweeping the out-of-sample window and
+    reporting the best point is tuning on the test set with extra steps — so the
+    default end date here stops well before the default backtest end.
+    """
+    settings = Settings()
+    configure_logging("WARNING", settings.log_format)
+
+    grid = _grid_from(axis or ["fast=10:60:10"])
+    evaluator, ledger = _evaluator(
+        symbol=symbol,
+        config=config,
+        source=source,
+        capital=capital,
+        adjustment=adjustment,
+        slippage=slippage,
+        objective=objective,
+        min_trades=min_trades,
+        ledger_path=ledger_path,
+        kind="sensitivity",
+    )
+    index = evaluator.load(dt.date.fromisoformat(start), dt.date.fromisoformat(end))
+    console.print(f"{len(index)} bars, sweeping {grid.size} points ({grid.describe()})…")
+
+    warmup = max(_warmup_for(dict(p), 2) for p in grid.points())
+    window = window_from(index, 0, len(index))
+    measured = window_from(index, min(warmup, len(index) - 1), len(index))
+    surface = _sweep(evaluator, grid, window, measured, Objective(objective, min_trades=min_trades))
+
+    console.print()
+    for name in grid.names:
+        rows = [(str(v), f"{s:.3f}" if s > -1e308 else "—") for v, s in surface.axis_profile(name)]
+        table = Table(title=f"{objective} along {name}", title_justify="left", box=box.SIMPLE)
+        table.add_column(name, style="bold cyan")
+        table.add_column(objective, justify="right")
+        for value, score in rows:
+            table.add_row(value, score)
+        console.print(table)
+
+    _render_rows(
+        [("Sensitivity", label, value) for label, value in surface.summary_lines()],
+        f"Parameter surface — {config} on {symbol}",
+    )
+    colour = "green" if surface.is_plateau else "red"
+    console.print(f"[{colour}]{surface.verdict()}[/{colour}]")
+    console.print(
+        f"[dim]Ledger now holds {ledger.trial_count(Path(config).stem)} distinct trials "
+        f"for this strategy. Every one of them deflates the Sharpe of whichever "
+        f"point you pick.[/dim]"
+    )
+
+
+def _sweep(
+    evaluator: EngineEvaluator,
+    grid: ParameterGrid,
+    window: Window,
+    measured: Window,
+    objective: Objective,
+) -> SensitivitySurface:
+    """Sweep with the warmup derived per point, which ``run_sensitivity`` cannot do."""
+    points: list[GridPoint] = []
+    for params in grid.points():
+        point = dict(params)
+        point["warmup_bars"] = _warmup_for(point, 2)
+        outcome = evaluator(point, window, measured)
+        # Keyed on the swept axes only: `warmup_bars` is derived, so including it
+        # would make every point its own island and break the neighbourhood test.
+        points.append(
+            GridPoint(params=dict(params), score=objective.score(outcome), outcome=outcome)
+        )
+    return SensitivitySurface(grid=grid, points=tuple(points), objective=objective)
+
+
+@app.command()
+def experiments(
+    strategy: str = "",
+    ledger_path: str = "data/experiments.sqlite",
+    limit: int = 10,
+) -> None:
+    """What has been tried. The denominator the deflated Sharpe needs."""
+    ledger = ExperimentLedger(ledger_path)
+    rows = ledger.strategies()
+    if not rows:
+        console.print(
+            "[yellow]No experiments recorded.[/yellow] Run `trading sensitivity` or "
+            "`trading walk-forward` — they record every evaluation as they go."
+        )
+        return
+
+    table = Table(title=f"Experiment ledger — {ledger_path}", title_justify="left", box=box.SIMPLE)
+    for column in ("strategy", "instrument", "trials", "evaluations", "best", "last seen"):
+        table.add_column(column, justify="right" if column in ("trials", "evaluations") else "left")
+    for row in rows:
+        best = row["best_objective"]
+        table.add_row(
+            str(row["strategy_id"]),
+            str(row["instrument"]),
+            str(row["trials"]),
+            str(row["evaluations"]),
+            f"{best:.3f}" if best is not None else "—",
+            str(row["last_seen"])[:19],
+        )
+    console.print(table)
+
+    if strategy:
+        top = ledger.best(strategy, limit=limit)
+        detail = Table(title=f"Top {len(top)} by objective", title_justify="left", box=box.SIMPLE)
+        for column in ("kind", "parameters", "objective", "window", "tier"):
+            detail.add_column(column)
+        for row in top:
+            detail.add_row(
+                str(row["kind"]),
+                str(row["params_json"]),
+                f"{row['objective_value']:.3f}",
+                f"{row['start_date']!s} → {row['end_date']!s}",
+                str(row["data_tier"]),
+            )
+        console.print(detail)
+        console.print(
+            "[dim]The top of this list is selected, so its ratio is the maximum of "
+            f"{ledger.trial_count(strategy)} trials. Read the two together or not "
+            "at all.[/dim]"
+        )
+
+
+@app.command()
+def validate(
+    symbol: str = "RELIANCE",
+    config: str = "configs/strategies/sma_cross_param.yaml",
+    axis: Annotated[list[str] | None, typer.Option(help="name=values, repeatable")] = None,
+    source: str = "fixture",
+    start: str = "2015-01-01",
+    end: str = "2026-08-21",
+    sweep_end: str = "",
+    capital: float = 400_000,
+    train_bars: int = 756,
+    test_bars: int = 252,
+    objective: str = "sharpe",
+    min_trades: int = 2,
+    slippage: str = "spread",
+    adjustment: str = "SPLIT_ONLY",
+    risk_profile_path: str = "",
+    paths: int = 2_000,
+    seed: int = 0,
+    cv_folds: int = 5,
+    skip_cv: bool = False,
+    ledger_path: str = "data/experiments.sqlite",
+) -> None:
+    """Run the whole Phase 6 battery and answer the ``VALIDATED`` lifecycle gate.
+
+    Walk-forward, a parameter sweep on the training period, purged
+    cross-validation, and two Monte Carlo resamplings — then the gate, with the
+    evidence each criterion came from.
+
+    Expect this to fail. It is built to.
+    """
+    settings = Settings()
+    configure_logging("WARNING", settings.log_format)
+
+    limits = load_risk_profile(risk_profile_path) if risk_profile_path else RiskLimits()
+    grid = _grid_from(axis or ["fast=20,30,40,50,60", "slow=100,150,200"])
+    evaluator, ledger = _evaluator(
+        symbol=symbol,
+        config=config,
+        source=source,
+        capital=capital,
+        adjustment=adjustment,
+        slippage=slippage,
+        objective=objective,
+        min_trades=min_trades,
+        ledger_path=ledger_path,
+        kind="validate",
+    )
+    start_date, end_date = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    index = evaluator.load(start_date, end_date)
+    points = _expand(grid, warmup_floor=2)
+    warmup = max(_warmup_for(p, 2) for p in points)
+    obj = Objective(metric=objective, min_trades=min_trades)
+
+    console.print(
+        f"[bold]Validating {config} on {symbol}[/bold]\n"
+        f"{len(index)} bars {index[0].date()}..{index[-1].date()}, "
+        f"{len(points)} parameter sets, tier {evaluator.data_tier}"
+    )
+
+    # ── 1. walk-forward ─────────────────────────────────────────────────────
+    console.print("\n[bold]1/4 walk-forward[/bold] — optimise, then trade forward…")
+    evaluator.ledger_kind = "walk_forward"
+    wf = run_walk_forward(
+        evaluator,
+        index,
+        points,
+        WalkForwardConfig(
+            train_bars=train_bars,
+            test_bars=test_bars,
+            warmup_bars=warmup,
+            objective=obj,
+        ),
+    )
+    for fold in wf.folds:
+        console.print(f"  [{'green' if fold.scored else 'yellow'}]{fold.label()}[/]")
+
+    # ── 2. sensitivity, on the training period only ─────────────────────────
+    console.print("\n[bold]2/4 parameter surface[/bold] — plateau or spike…")
+    surface = _validate_sweep(
+        evaluator, grid, index, obj, sweep_end=sweep_end, train_bars=train_bars, warmup=warmup
+    )
+
+    # ── 3. purged cross-validation ──────────────────────────────────────────
+    console.print("\n[bold]3/4 purged cross-validation[/bold] — every regime as a test fold…")
+    cv = _validate_cv(evaluator, index, points, obj, folds=cv_folds, warmup=warmup, skip=skip_cv)
+
+    # ── 4. Monte Carlo ──────────────────────────────────────────────────────
+    console.print("\n[bold]4/4 Monte Carlo[/bold] — the drawdown you did not happen to see…")
+    trade_mc, path_mc = _validate_monte_carlo(
+        wf, capital=capital, paths=paths, seed=seed, limit=float(limits.max_drawdown)
+    )
+
+    # ── the report, and the gate ────────────────────────────────────────────
+    spec = load_strategy(Path(config)).spec
+    instrument_id = str(_instrument(symbol).id)
+    report = ValidationReport(
+        strategy_id=spec.id,
+        strategy_version=spec.version,
+        instrument=instrument_id,
+        data_tier=evaluator.data_tier,
+        walk_forward=wf,
+        trial_count=ledger.trial_count(spec.id, instrument_id),
+        drawdown_limit=limits.max_drawdown,
+        purged_cv=cv,
+        sensitivity=surface,
+        trade_monte_carlo=trade_mc,
+        path_monte_carlo=path_mc,
+        starting_capital=Decimal(str(capital)),
+    )
+    _render_validation(report, symbol)
+
+
+def _validate_sweep(
+    evaluator: EngineEvaluator,
+    grid: ParameterGrid,
+    index: pd.DatetimeIndex,
+    objective: Objective,
+    *,
+    sweep_end: str,
+    train_bars: int,
+    warmup: int,
+) -> SensitivitySurface:
+    """Sweep the parameters over the training period only.
+
+    The window stops at the end of the first training block by default. Sweeping
+    the out-of-sample period and reporting the best point would be tuning on the
+    test set, which is the failure the rest of this command exists to detect.
+    """
+    evaluator.ledger_kind = "sensitivity"
+    stop = (
+        dt.date.fromisoformat(sweep_end)
+        if sweep_end
+        else index[min(train_bars, len(index) - 1)].date()
+    )
+    # The bar index is UTC-aware; a date is not. Comparing them raises rather
+    # than silently mis-slicing, which is the right behaviour and has to be
+    # honoured here rather than worked around downstream.
+    cutoff = pd.Timestamp(stop, tz=index.tz) if index.tz is not None else pd.Timestamp(stop)
+    stop_index = max(int(index.searchsorted(cutoff)), warmup + 2)
+    window = window_from(index, 0, min(stop_index, len(index)))
+    measured = window_from(index, min(warmup, window.stop_index - 1), window.stop_index)
+    surface = _sweep(evaluator, grid, window, measured, objective)
+    console.print(f"  swept {window.label()} — {surface.verdict()}")
+    return surface
+
+
+def _validate_cv(
+    evaluator: EngineEvaluator,
+    index: pd.DatetimeIndex,
+    points: list[dict[str, Any]],
+    objective: Objective,
+    *,
+    folds: int,
+    warmup: int,
+    skip: bool,
+) -> PurgedCvResult | None:
+    if skip:
+        console.print("  [yellow]skipped[/yellow]")
+        return None
+    evaluator.ledger_kind = "purged_cv"
+    result = run_purged_cv(
+        evaluator,
+        index,
+        points,
+        PurgedCvConfig(
+            n_splits=folds,
+            purge_bars=20,
+            embargo_bars=10,
+            warmup_bars=warmup,
+            objective=objective,
+        ),
+    )
+    for fold in result.folds:
+        console.print(f"  [{'green' if fold.scored else 'yellow'}]{fold.label()}[/]")
+    return result
+
+
+def _validate_monte_carlo(
+    wf: WalkForwardResult,
+    *,
+    capital: float,
+    paths: int,
+    seed: int,
+    limit: float,
+) -> tuple[MonteCarloResult | None, MonteCarloResult | None]:
+    """Resample the out-of-sample record two ways, or say why neither was possible."""
+    trade_mc = path_mc = None
+    pnl = wf.oos_trade_pnl
+    if len(pnl) >= 2:
+        trade_mc = resample_trades(
+            pnl, starting_capital=capital, paths=paths, seed=seed, ruin_threshold=limit
+        )
+        console.print(f"  trades: {trade_mc.verdict(limit)}")
+    else:
+        console.print(
+            f"  [yellow]only {len(pnl)} out-of-sample trades — cannot resample a "
+            f"distribution from that[/yellow]"
+        )
+
+    oos = wf.oos_returns
+    if len(oos) >= 40:
+        path_mc = block_bootstrap_returns(
+            oos, block_bars=20, paths=paths, seed=seed, ruin_threshold=limit
+        )
+        console.print(f"  path:   {path_mc.verdict(limit)}")
+    else:
+        console.print(
+            f"  [yellow]only {len(oos)} out-of-sample bars — too few to bootstrap[/yellow]"
+        )
+    return trade_mc, path_mc
+
+
+def _render_validation(report: ValidationReport, symbol: str) -> None:
+    """Print the report, then put it through the lifecycle gate it answers."""
+    console.print()
+    _render_rows(report.summary_lines(), f"Validation report — {report.strategy_id} on {symbol}")
+    colour = "green" if report.passed else "red"
+    console.print(f"[{colour}]{report.verdict()}[/{colour}]")
+
+    decision = evaluate_promotion(
+        report.strategy_id,
+        LifecycleStatus.PROMISING,
+        LifecycleStatus.VALIDATED,
+        evidence_from_validation(report),
+    )
+    console.print(f"\n[bold]Lifecycle gate:[/bold] {decision.summary()}")
+    for result in decision.results:
+        mark = "green" if result.status is CriterionStatus.PASS else "red"
+        console.print(f"  [{mark}]{result}[/{mark}]")
